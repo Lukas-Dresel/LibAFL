@@ -84,6 +84,31 @@ pub trait HasCorpus: UsesInput {
     fn corpus_mut(&mut self) -> &mut Self::Corpus;
 }
 
+
+pub trait BetterStateTrait: UsesInput
+{
+    type Rand: Rand;
+    type Corpus: Corpus<Input = <Self as UsesInput>::Input>;
+
+    fn get_state_components_rand_corpus_metadata(&mut self) -> (&mut Self::Rand, &mut Self::Corpus, &mut SerdeAnyMap);
+}
+
+impl<I, C, R, SC> BetterStateTrait for StdState<I, C, R, SC>
+where
+    C: Corpus<Input = I>,
+    I: Input,
+    R: Rand,
+    SC: Corpus<Input = I>,
+{
+    type Rand = R;
+    type Corpus = C;
+
+    fn get_state_components_rand_corpus_metadata(&mut self) -> (&mut Self::Rand, &mut Self::Corpus, &mut SerdeAnyMap) {
+        (&mut self.rand, &mut self.corpus, &mut self.metadata)
+    }
+}
+
+
 /// Interact with the maximum size
 pub trait HasMaxSize {
     /// The maximum size hint for items and mutations returned

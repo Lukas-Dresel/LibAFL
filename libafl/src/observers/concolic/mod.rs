@@ -30,6 +30,14 @@ pub type SymExprRef = NonZeroUsize;
 #[repr(transparent)]
 pub struct Location(usize);
 
+impl Location {
+    /// Creates a location from a pointer-sized value. Can be used at compile time to create static consts.
+    pub const fn constant(value: usize) -> Self {
+        Self(value)
+    }
+}
+
+
 impl Debug for Location {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         Debug::fmt(&self.0, f)
@@ -348,6 +356,66 @@ pub enum SymExpr {
         constraint: SymExprRef,
         taken: bool,
         location: Location,
+    },
+
+
+    ConcretizePointer {
+        expr: SymExprRef,
+        value: usize,
+        location: Location,
+    },
+
+    ConcretizeSize {
+        expr: SymExprRef,
+        value: usize,
+        location: Location,
+    },
+
+    MemoryRead {
+        address_expr: Option<SymExprRef>,
+        value_read: Option<SymExprRef>,
+        concrete_address: usize,
+        length: usize,
+        little_endian: bool,
+    },
+    MemoryWrite {
+        symbolic_address: Option<SymExprRef>,
+        written_value: Option<SymExprRef>,
+        concrete_address: usize,
+        size: usize,
+        little_endian: bool,
+    },
+    MemSet {
+        symbolic_address: Option<SymExprRef>,
+        symbolic_value: Option<SymExprRef>,
+        symbolic_size: Option<SymExprRef>,
+        concrete_address: usize,
+        concrete_value: u8,
+        concrete_size: usize,
+    },
+    MemCopy {
+        symbolic_dest: Option<SymExprRef>,
+        symbolic_src: Option<SymExprRef>,
+        symbolic_size: Option<SymExprRef>,
+        concrete_dest: usize,
+        concrete_src: usize,
+        concrete_size: usize,
+    },
+    MemMove {
+        symbolic_dest: Option<SymExprRef>,
+        symbolic_src: Option<SymExprRef>,
+        symbolic_size: Option<SymExprRef>,
+        concrete_dest: usize,
+        concrete_src: usize,
+        concrete_size: usize,
+    },
+
+    SetParameter {
+        index: u8,
+        expr: SymExprRef,
+    },
+    SetReturnValue {
+        expr: SymExprRef,
     },
 
     /// These expressions won't be referenced again

@@ -9,7 +9,7 @@ use crate::observers::concolic::{serialization_format::MessageFileReader, SymExp
 #[allow(clippy::unsafe_derive_deserialize)]
 pub struct ConcolicMetadata {
     /// Constraints data
-    buffer: Vec<u8>,
+    pub buffer: Vec<u8>,
 }
 
 impl ConcolicMetadata {

@@ -1,16 +1,49 @@
 //! Tracing of expressions in a serialized form.
 
+use std::num::NonZeroUsize;
+
 pub use libafl::observers::concolic::serialization_format::StdShMemMessageFileWriter;
 use libafl::observers::concolic::SymExpr;
+use lru::LruCache;
 
 use crate::{RSymExpr, Runtime};
 
 /// Traces the expressions according to the format described in [`libafl::observers::concolic::serialization_format`].
 ///
 /// The format can be read from elsewhere to perform processing of the expressions outside of the runtime.
+///
+
+#[derive(PartialEq, Eq, PartialOrd, Hash)]
+pub enum CacheableExpression {
+    Extract(RSymExpr, usize, usize),
+    Concat(RSymExpr, RSymExpr),
+    Add(RSymExpr, RSymExpr),
+    And(RSymExpr, RSymExpr),
+    Sub(RSymExpr, RSymExpr),
+    LShR(RSymExpr, RSymExpr),
+}
+impl CacheableExpression {
+    fn for_symexpr(msg: &SymExpr) -> Option<Self> {
+        match msg {
+            SymExpr::Extract { op, first_bit, last_bit } => Some(CacheableExpression::Extract(*op, *first_bit, *last_bit)),
+            SymExpr::Concat { a, b } => Some(CacheableExpression::Concat(*a, *b)),
+            SymExpr::Add { a, b } => Some(CacheableExpression::Add(*a, *b)),
+            SymExpr::And { a, b } => Some(CacheableExpression::And(*a, *b)),
+            SymExpr::Sub { a, b } => Some(CacheableExpression::Sub(*a, *b)),
+            SymExpr::LogicalShiftRight { a, b } => Some(CacheableExpression::LShR(*a, *b)),
+            _ => None,
+        }
+    }
+}
 pub struct TracingRuntime {
-    writer: StdShMemMessageFileWriter,
+    writer: Option<StdShMemMessageFileWriter>,
+    // LRU cache for expressions, to avoid duplicate expressions in the trace
+    expression_cache: LruCache<CacheableExpression, RSymExpr>,
+    const_int_cache: LruCache<(u64,u8), RSymExpr>,
     trace_locations: bool,
+    print_to_stdout: bool,
+    trace_before_symbolic_input: bool,
+    saw_symbolic_input: bool,
 }
 
 impl TracingRuntime {
@@ -18,16 +51,76 @@ impl TracingRuntime {
     /// When `trace_locations` is true, location information for calls, returns and basic blocks will also be part of the trace.
     /// Tracing location information can drastically increase trace size. It is therefore recommended to not active this if not needed.
     #[must_use]
-    pub fn new(writer: StdShMemMessageFileWriter, trace_locations: bool) -> Self {
+    pub fn new(writer: Option<StdShMemMessageFileWriter>, trace_locations: bool, print_to_stdout: bool, trace_before_symbolic_input: bool) -> Self {
         Self {
             writer,
+            expression_cache: LruCache::new(NonZeroUsize::new(0x800).unwrap()),
+            const_int_cache: LruCache::new(NonZeroUsize::new(0x100).unwrap()),
             trace_locations,
+            print_to_stdout,
+            trace_before_symbolic_input,
+            saw_symbolic_input: false,
         }
     }
 
+
     #[allow(clippy::unnecessary_wraps)]
     fn write_message(&mut self, message: SymExpr) -> Option<RSymExpr> {
-        Some(self.writer.write_message(message).unwrap())
+        if let SymExpr::InputByte { .. } = message {
+            self.saw_symbolic_input = true;
+        }
+        if !self.trace_before_symbolic_input && !self.saw_symbolic_input {
+            return None;
+        }
+
+        if let Some(w) = &mut self.writer {
+            #[cfg(feature="concolic_expression_caching")]
+            let int_cache_key = if let SymExpr::Integer { value, bits } = &message {
+                Some((*value, *bits))
+            } else {
+                None
+            };
+            #[cfg(feature="concolic_expression_caching")]
+            if let Some(int_cache_key) = &int_cache_key {
+                if let Some(cached) = self.const_int_cache.get(int_cache_key) {
+                    return Some(*cached);
+                }
+
+            }
+            #[cfg(feature="concolic_expression_caching")]
+            let cache_key = CacheableExpression::for_symexpr(&message);
+            #[cfg(feature="concolic_expression_caching")]
+            if let Some(cache_key) = &cache_key {
+                if let Some(found_val) = self.expression_cache.get(cache_key) {
+                    return Some(*found_val);
+                }
+            }
+
+            let res = if self.print_to_stdout {
+                let msg_string = format!("{:x?}", message);
+                let res = w.write_message(message).unwrap();
+                println!("{:x}: {}", res, msg_string);
+                res
+            }
+            else {
+                w.write_message(message).unwrap()
+            };
+            #[cfg(feature="concolic_expression_caching")]
+            if let Some(int_cache_key) = int_cache_key {
+                self.const_int_cache.push(int_cache_key, res);
+            }
+            #[cfg(feature="concolic_expression_caching")]
+            if let Some(cache_key) = cache_key {
+                self.expression_cache.push(cache_key, res);
+            }
+
+            Some(res)
+        } else {
+            if self.print_to_stdout {
+                println!("{:x?}", message);
+            }
+            None
+        }
     }
 }
 
@@ -161,7 +254,32 @@ impl Runtime for TracingRuntime {
     expression_builder!(build_bool_to_bit(op: RSymExpr) => BoolToBit);
 
     binary_expression_builder!(concat_helper, Concat);
-    expression_builder!(extract_helper(op: RSymExpr, first_bit:usize, last_bit:usize) => Extract);
+    // expression_builder!(extract_helper(op: RSymExpr, first_bit:usize, last_bit:usize) => Extract);
+
+    fn extract_helper(&mut self,expr:RSymExpr,first_bit:usize,last_bit:usize) -> Option<RSymExpr> {
+        // assert!(first_bit <= 0xffff_ffff, "z3 can't handle this, and if this happens it's pretty certainly a bug anyways, expr: {:?}, first_bit: {}, last_bit: {}", expr, first_bit, last_bit);
+        // assert!(last_bit <= 0xffff_ffff, "z3 can't handle this, and if this happens it's pretty certainly a bug anyways, expr: {:?}, first_bit: {}, last_bit: {}", expr, first_bit, last_bit);
+
+
+        // if (first_bit as isize) < 0 {
+        //     return None;
+        // }
+        // if (last_bit as isize) < 0 {
+        //     return None;
+        // }
+        // if first_bit >= 0xffff_ffff {
+        //     return None;
+        // }
+        // if last_bit >= 0xffff_ffff {
+        //     return None;
+        // }
+
+        self.write_message(SymExpr::Extract {
+            op: expr,
+            first_bit,
+            last_bit
+        })
+    }
 
     fn notify_call(&mut self, site_id: usize) {
         if self.trace_locations {
@@ -187,6 +305,17 @@ impl Runtime for TracingRuntime {
         }
     }
 
+    fn notify_param_expr(&mut self, index: u8, param: RSymExpr) {
+        self.write_message(SymExpr::SetParameter {
+            index,
+            expr: param,
+        });
+    }
+
+    fn notify_ret_expr(&mut self, expr: RSymExpr) {
+        self.write_message(SymExpr::SetReturnValue { expr });
+    }
+
     fn expression_unreachable(&mut self, exprs: &[RSymExpr]) {
         self.write_message(SymExpr::ExpressionsUnreachable {
             exprs: exprs.to_owned(),
@@ -200,13 +329,105 @@ impl Runtime for TracingRuntime {
             location: site_id.into(),
         });
     }
+
+    fn concretize_pointer(&mut self, expr: RSymExpr, value: usize, site_id: usize) {
+        self.write_message(SymExpr::ConcretizePointer {
+            expr,
+            value: value as usize,
+            location: site_id.into(),
+        });
+    }
+    fn concretize_size(&mut self, expr: RSymExpr, value: usize, site_id: usize) {
+        self.write_message(SymExpr::ConcretizeSize {
+            expr,
+            value: value.into(),
+            location: site_id.into(),
+        });
+    }
+    fn backend_memcpy(
+        &mut self,
+        sym_dest:Option<RSymExpr>, sym_src:Option<RSymExpr>, sym_len:Option<RSymExpr>,
+        dest: *mut u8,src: *const u8,length:usize
+    ) {
+        self.write_message(
+            SymExpr::MemCopy {
+                symbolic_dest: sym_dest,
+                symbolic_src: sym_src,
+                symbolic_size: sym_len,
+                concrete_dest: dest as usize,
+                concrete_src: src as usize,
+                concrete_size: length as usize,
+            }
+        );
+    }
+    fn backend_memmove(&mut self,sym_dest:Option<RSymExpr>,sym_src:Option<RSymExpr>,sym_len:Option<RSymExpr>,dest: *mut u8,src: *const u8,length:usize,) {
+        self.write_message(
+            SymExpr::MemMove {
+                symbolic_dest: sym_dest,
+                symbolic_src: sym_src,
+                symbolic_size: sym_len,
+                concrete_dest: dest as usize,
+                concrete_src: src as usize,
+                concrete_size: length as usize,
+            }
+        );
+    }
+    fn backend_memset(&mut self,sym_dest:Option<RSymExpr>,sym_val:Option<RSymExpr>,sym_len:Option<RSymExpr>,memory: *mut u8,value: std::os::raw::c_int,length:usize,) {
+        self.write_message(
+            SymExpr::MemSet {
+                symbolic_address: sym_dest,
+                symbolic_value: sym_val,
+                symbolic_size: sym_len,
+                concrete_address: memory as usize,
+                concrete_value: value as u8,
+                concrete_size: length as usize,
+            }
+        );
+    }
+    fn backend_read_memory(&mut self,
+        addr_expr: Option<RSymExpr>, concolic_read_value: Option<RSymExpr>,
+        addr: *mut u8, length:usize, little_endian:bool
+    ) -> Option<RSymExpr> {
+        let msg_id = self.write_message(
+            SymExpr::MemoryRead {
+                address_expr: addr_expr,
+                value_read: concolic_read_value,
+                concrete_address: addr as usize,
+                length: length as usize,
+                little_endian,
+            }
+        ).unwrap();
+        if concolic_read_value.is_some() { // only if we actually read from a symbolic buffer should we return this
+            Some(msg_id)
+        }
+        else {
+            // until we know what to do with concrete reads from symbolic addresses, return None here to ensure
+            // concreteness
+            None
+        }
+    }
+    fn backend_write_memory(&mut self,
+        symbolic_addr_expr: Option<RSymExpr>, written_expr: Option<RSymExpr>,
+        concrete_addr: *mut u8, concrete_length:usize, little_endian:bool) {
+        self.write_message(
+            SymExpr::MemoryWrite {
+                symbolic_address: symbolic_addr_expr,
+                written_value: written_expr,
+                concrete_address: concrete_addr as usize,
+                size: concrete_length,
+                little_endian,
+            }
+        );
+    }
 }
 
 impl Drop for TracingRuntime {
     fn drop(&mut self) {
         // manually end the writer to update the length prefix
-        self.writer
-            .update_trace_header()
-            .expect("failed to shut down writer");
+        if let Some(writer) = &mut self.writer {
+            writer
+                .update_trace_header()
+                .expect("failed to shut down writer");
+        }
     }
 }
