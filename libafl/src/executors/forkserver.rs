@@ -988,9 +988,10 @@ where
                 send_status |= FS_OPT_AUTODICT;
             }
 
-            if send_status != FS_OPT_ENABLED {
-                // if send_status is not changed (Options are available but we didn't use any), then don't send the next write_ctl message.
-                // This is important
+            // // let send_len = forkserver.write_ctl(send_status)?;
+            // if send_len != 4 {
+            //     return Err(Error::unknown("Writing to forkserver failed.".to_string()));
+            // }
 
                 let send_len = forkserver.write_ctl(send_status)?;
                 if send_len != 4 {
@@ -1027,28 +1028,19 @@ where
             log::warn!("Forkserver Options are not available.");
         }
 
-        Ok(())
-    }
-
-    #[allow(clippy::cast_sign_loss)]
-    fn set_map_size(&mut self, fsrv_map_size: i32) {
-        // When 0, we assume that map_size was filled by the user or const
-        /* TODO autofill map size from the observer
-
-        if fsrv_map_size > 0 {
-            self.map_size = Some(fsrv_map_size as usize);
+        let (rlen, start_constant) = forkserver.read_st()?;
+        if rlen != 4 {
+            return Err(Error::unknown("Failed to start a forkserver".to_string()));
         }
-        */
-        let mut map_size = fsrv_map_size;
-        if map_size % 64 != 0 {
-            map_size = ((map_size + 63) >> 6) << 6;
+        if (start_constant as u32) != 0x4269dead {
+            return Err(Error::unknown("Forkserver desync: Start constant does not match??".to_string()))
+        }
+        let send_len = forkserver.write_ctl(0x4269dead)?;
+        if send_len != 4 {
+            return Err(Error::unknown("Writing to forkserver failed.".to_string()));
         }
 
-        // TODO set AFL_MAP_SIZE
-        assert!(self.map_size.is_none() || map_size as usize <= self.map_size.unwrap());
-
-        // we'll use this later when we truncate the observer
-        self.map_size = Some(map_size as usize);
+        Ok((forkserver, input_file, map))
     }
 
     /// Use autodict?
