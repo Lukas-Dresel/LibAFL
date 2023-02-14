@@ -772,10 +772,10 @@ impl<'a, SP> ForkserverExecutorBuilder<'a, SP> {
                 self.map_size = Some(map_size as usize);
             }
 
-            let send_len = forkserver.write_ctl(send_status)?;
-            if send_len != 4 {
-                return Err(Error::unknown("Writing to forkserver failed.".to_string()));
-            }
+            // // let send_len = forkserver.write_ctl(send_status)?;
+            // if send_len != 4 {
+            //     return Err(Error::unknown("Writing to forkserver failed.".to_string()));
+            // }
 
             if (send_status & FS_OPT_AUTODICT) == FS_OPT_AUTODICT {
                 let (read_len, dict_size) = forkserver.read_st()?;
@@ -805,6 +805,18 @@ impl<'a, SP> ForkserverExecutorBuilder<'a, SP> {
             }
         } else {
             log::warn!("Forkserver Options are not available.");
+        }
+
+        let (rlen, start_constant) = forkserver.read_st()?;
+        if rlen != 4 {
+            return Err(Error::unknown("Failed to start a forkserver".to_string()));
+        }
+        if (start_constant as u32) != 0x4269dead {
+            return Err(Error::unknown("Forkserver desync: Start constant does not match??".to_string()))
+        }
+        let send_len = forkserver.write_ctl(0x4269dead)?;
+        if send_len != 4 {
+            return Err(Error::unknown("Writing to forkserver failed.".to_string()));
         }
 
         Ok((forkserver, input_file, map))
