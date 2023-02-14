@@ -8,7 +8,7 @@ use crate::observers::concolic::{serialization_format::MessageFileReader, SymExp
 #[derive(Default, Serialize, Deserialize, Debug)]
 pub struct ConcolicMetadata {
     /// Constraints data
-    buffer: Vec<u8>,
+    pub buffer: Vec<u8>,
 }
 
 impl ConcolicMetadata {

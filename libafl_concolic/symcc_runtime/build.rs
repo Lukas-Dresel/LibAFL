@@ -112,7 +112,12 @@ fn checkout_symcc(out_path: &Path) -> PathBuf {
     } else {
         let repo_dir = out_path.join("libafl_symcc_src");
         if !repo_dir.exists() {
-            clone_symcc(&repo_dir);
+            if let Ok(repo) = std::env::var("SYMCC_DIR") {
+                // symlink the repo into the build dir
+                std::os::unix::fs::symlink(repo, &repo_dir).unwrap();
+            } else {
+                clone_symcc(&repo_dir);
+            }
         }
         repo_dir
     }

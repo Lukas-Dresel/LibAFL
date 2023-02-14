@@ -198,6 +198,49 @@ impl<R: Read> MessageFileReader<R> {
             SymExpr::PathConstraint { constraint: op, .. } => {
                 *op = self.make_absolute(*op);
             }
+            SymExpr::ConcretizePointer { expr, .. } | SymExpr::ConcretizeSize { expr, .. } => {
+                *expr = self.make_absolute(*expr);
+            }
+            SymExpr::MemoryRead { address_expr, value_read, .. } => {
+                // *address = self.make_absolute(*address);
+                address_expr.as_mut().map(|x| *x = self.make_absolute(*x));
+                value_read.as_mut().map(|x| *x = self.make_absolute(*x));
+
+                // see explanation in make_relative case for why this is necessary (short: not enough data, would have
+                // to return unconstrained values or something)
+                if value_read.is_some() {
+                    self.current_id += 1;
+                }
+            }
+            SymExpr::MemoryWrite { symbolic_address, written_value, .. } => {
+                symbolic_address.as_mut().map(|x| *x = self.make_absolute(*x));
+                written_value.as_mut().map(|x| *x = self.make_absolute(*x));
+                self.current_id += 1;
+            }
+            SymExpr::MemSet { symbolic_address, symbolic_value, symbolic_size, .. } => {
+                symbolic_address.as_mut().map(|x| *x = self.make_absolute(*x));
+                symbolic_value.as_mut().map(|x| *x = self.make_absolute(*x));
+                symbolic_size.as_mut().map(|x| *x = self.make_absolute(*x));
+                self.current_id += 1;
+            }
+            SymExpr::MemCopy { symbolic_dest, symbolic_src, symbolic_size, .. } => {
+                symbolic_dest.as_mut().map(|x| *x = self.make_absolute(*x));
+                symbolic_src.as_mut().map(|x| *x = self.make_absolute(*x));
+                symbolic_size.as_mut().map(|x| *x = self.make_absolute(*x));
+                self.current_id += 1;
+            }
+            SymExpr::MemMove { symbolic_dest, symbolic_src, symbolic_size, .. } => {
+                symbolic_dest.as_mut().map(|x| *x = self.make_absolute(*x));
+                symbolic_src.as_mut().map(|x| *x = self.make_absolute(*x));
+                symbolic_size.as_mut().map(|x| *x = self.make_absolute(*x));
+                self.current_id += 1;
+            }
+            SymExpr::SetParameter { expr, .. } => {
+                *expr = self.make_absolute(*expr);
+            },
+            SymExpr::SetReturnValue { expr } => {
+                *expr = self.make_absolute(*expr);
+            },
             SymExpr::ExpressionsUnreachable { exprs } => {
                 for expr in exprs {
                     *expr = self.make_absolute(*expr);
@@ -270,7 +313,13 @@ impl<W: Write + Seek> MessageFileWriter<W> {
     }
 
     fn make_relative(&self, expr: SymExprRef) -> SymExprRef {
-        SymExprRef::new(self.id_counter - expr.get()).unwrap()
+        let expr = expr.get();
+        SymExprRef::new(self.id_counter - expr).unwrap_or_else(|| {
+            panic!(
+                "Cannot make relative: id_counter: {:?}, expr: {:?}",
+                self.id_counter, expr
+            )
+        })
     }
 
     /// Writes a message to the stream and returns the [`SymExprRef`] that should be used to refer back to this message.
@@ -364,6 +413,58 @@ impl<W: Write + Seek> MessageFileWriter<W> {
             SymExpr::PathConstraint { constraint: op, .. } => {
                 *op = self.make_relative(*op);
             }
+            SymExpr::ConcretizePointer { expr, ..} | SymExpr::ConcretizeSize { expr, .. } => {
+                *expr = self.make_relative(*expr);
+            }
+            SymExpr::MemoryRead { address_expr, value_read, .. } => {
+                address_expr.as_mut().map(|x| *x = self.make_relative(*x));
+                value_read.as_mut().map(|x| *x = self.make_relative(*x));
+
+                // TODO: figure out how to handle the case where address is symbolic but data is not (e.g. lookup table)
+                // this leads to a situation where the data is not written to the trace, but the address is
+                // and requires us to know the possible values being read.
+
+                // for now, only return a symbolic expression if the data is symbolic (value_read is Some)
+                if value_read.is_some() {
+                    self.id_counter += 1;
+                }
+            }
+            SymExpr::MemoryWrite { symbolic_address, written_value, .. } => {
+                symbolic_address.as_mut().map(|x| *x = self.make_relative(*x));
+                written_value.as_mut().map(|x| *x = self.make_relative(*x));
+                // here we increment the counter because reads can be served via the ID of the write
+                // where they were created (also, in symbolic memory models, this usually creates a
+                // new memory model expression). Otherwise, it simply doesn't mean anything and you
+                // can just error out if it ever gets referenced.
+                self.id_counter += 1;
+            }
+            SymExpr::MemSet { symbolic_address, symbolic_value, symbolic_size, .. } => {
+                symbolic_address.as_mut().map(|x| *x = self.make_relative(*x));
+                symbolic_value.as_mut().map(|x| *x = self.make_relative(*x));
+                symbolic_size.as_mut().map(|x| *x = self.make_relative(*x));
+                // same reason, this stores, so increment counter
+                self.id_counter += 1;
+            }
+            SymExpr::MemCopy { symbolic_dest, symbolic_src, symbolic_size, .. } => {
+                symbolic_dest.as_mut().map(|x| *x = self.make_relative(*x));
+                symbolic_src.as_mut().map(|x| *x = self.make_relative(*x));
+                symbolic_size.as_mut().map(|x| *x = self.make_relative(*x));
+                // same reason, this stores, so increment counter
+                self.id_counter += 1;
+            }
+            SymExpr::MemMove { symbolic_dest, symbolic_src, symbolic_size, .. } => {
+                symbolic_dest.as_mut().map(|x| *x = self.make_relative(*x));
+                symbolic_src.as_mut().map(|x| *x = self.make_relative(*x));
+                symbolic_size.as_mut().map(|x| *x = self.make_relative(*x));
+                // same reason, this stores, so increment counter
+                self.id_counter += 1;
+            }
+            SymExpr::SetParameter { expr, .. } => {
+                *expr = self.make_relative(*expr);
+            },
+            SymExpr::SetReturnValue { expr } => {
+                *expr = self.make_relative(*expr);
+            },
             SymExpr::ExpressionsUnreachable { exprs } => {
                 for expr in exprs {
                     *expr = self.make_relative(*expr);

@@ -74,7 +74,98 @@ macro_rules! rust_runtime_function_declaration {
         fn expression_unreachable(&mut self, exprs: &[RSymExpr]);
     };
 
+    (pub fn backend_read_memory(
+        addr_expr: RSymExpr,
+        concolic_read_value: RSymExpr,
+        addr: *mut u8,
+        length: usize,
+        little_endian: bool,
+    ) -> RSymExpr, $c_name:ident;) => {
+        #[allow(clippy::default_trait_access)]
+        fn backend_read_memory(
+            &mut self,
+            addr_expr: Option<RSymExpr>,
+            concolic_read_value: Option<RSymExpr>,
+            addr: *mut u8,
+            length: usize,
+            little_endian: bool,
+        ) -> Option<RSymExpr>;
+    };
+
+    (pub fn backend_write_memory(
+        symbolic_addr_expr: RSymExpr,
+        written_expr: RSymExpr,
+        concrete_addr: *mut u8,
+        concrete_length: usize,
+        little_endian: bool,
+    ), $c_name:ident;) => {
+        fn backend_write_memory(
+            &mut self,
+            symbolic_addr_expr: Option<RSymExpr>,
+            written_expr: Option<RSymExpr>,
+            concrete_addr: *mut u8,
+            concrete_length: usize,
+            little_endian: bool,
+        );
+    };
+
+    (pub fn backend_memcpy(
+        sym_dest: RSymExpr,
+        sym_src: RSymExpr,
+        sym_len: RSymExpr,
+        dest: *mut u8,
+        src: *const u8,
+        length: usize,
+    ), $c_name:ident;) => {
+        fn backend_memcpy(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_src: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            dest: *mut u8,
+            src: *const u8,
+            length: usize,
+        );
+    };
+    (pub fn backend_memmove(
+        sym_dest: RSymExpr,
+        sym_src: RSymExpr,
+        sym_len: RSymExpr,
+        dest: *mut u8,
+        src: *const u8,
+        length: usize,
+    ), $c_name:ident;) => {
+        fn backend_memmove(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_src: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            dest: *mut u8,
+            src: *const u8,
+            length: usize,
+        );
+    };
+    (pub fn backend_memset(
+        sym_dest: RSymExpr,
+        sym_val: RSymExpr,
+        sym_len: RSymExpr,
+        memory: *mut u8,
+        value: ::std::os::raw::c_int,
+        length: usize,
+    ), $c_name:ident;) => {
+        fn backend_memset(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_val: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            memory: *mut u8,
+            value: ::std::os::raw::c_int,
+            length: usize,
+        );
+    };
+
     (pub fn $name:ident($( $arg:ident : $type:ty ),*$(,)?)$( -> $ret:ty)?, $c_name:ident;) => {
+        // compile_error!(stringify!($name));
         fn $name(&mut self, $( $arg : $type),*)$( -> Option<$ret>)?;
     };
 }
@@ -153,8 +244,168 @@ macro_rules! export_rust_runtime_fn {
             }
         }
     };
+
+    (pub fn concretize_pointer(value: RSymExpr, ptr: usize, site_id: usize), $c_name:ident; $rt_cb:path) => {
+        #[allow(clippy::missing_safety_doc)]
+        #[no_mangle]
+        pub unsafe extern "C" fn _rsym_concretize_pointer(expr: Option<RSymExpr>, ptr: usize, site_id: usize) {
+            if let Some(expr) = expr {
+                $rt_cb(|rt| {
+                    rt.concretize_pointer(expr, ptr, site_id);
+                })
+            }
+        }
+    };
+    (pub fn concretize_size(value: RSymExpr, sz: usize, site_id: usize), $c_name:ident; $rt_cb:path) => {
+        #[allow(clippy::missing_safety_doc)]
+        #[no_mangle]
+        pub unsafe extern "C" fn _rsym_concretize_size(expr: Option<RSymExpr>, value: usize, site_id: usize) {
+            if let Some(expr) = expr {
+                $rt_cb(|rt| {
+                    rt.concretize_size(expr, value, site_id);
+                })
+            }
+        }
+    };
+    (pub fn notify_param_expr(index: u8, expr: RSymExpr), $c_name:ident; $rt_cb:path) => {
+        #[allow(clippy::missing_safety_doc)]
+        #[no_mangle]
+        pub unsafe extern "C" fn _rsym_notify_param_expr(index: u8, expr: Option<RSymExpr>) {
+            $rt_cb(|rt| {
+                if let Some(expr) = expr {
+                    rt.notify_param_expr(index, expr);
+                }
+            })
+        }
+    };
+    (pub fn notify_ret_expr(expr: RSymExpr), $c_name:ident; $rt_cb:path) => {
+        #[allow(clippy::missing_safety_doc)]
+        #[no_mangle]
+        pub unsafe extern "C" fn _rsym_notify_ret_expr(index: u8, expr: Option<RSymExpr>) {
+            $rt_cb(|rt| {
+                if let Some(expr) = expr {
+                    rt.notify_ret_expr(expr);
+                }
+            })
+        }
+    };
+
+    (pub fn backend_read_memory(
+        addr_expr: RSymExpr,
+        concolic_read_value: RSymExpr,
+        addr: *mut u8,
+        length: usize,
+        little_endian: bool,
+    ) -> RSymExpr, $c_name:ident; $rt_cb:path) => {
+        #[allow(clippy::missing_safety_doc)]
+        #[no_mangle]
+        pub unsafe extern "C" fn _rsym_backend_read_memory(
+            addr_expr: Option<RSymExpr>,
+            concolic_read_value: Option<RSymExpr>,
+            addr: *mut u8,
+            length: usize,
+            little_endian: bool,
+        ) -> Option<RSymExpr> {
+            return $rt_cb(|rt| {
+                rt.backend_read_memory(addr_expr, concolic_read_value, addr, length, little_endian)
+            });
+        }
+    };
+
+    (pub fn backend_write_memory(
+        symbolic_addr_expr: RSymExpr,
+        written_expr: RSymExpr,
+        concrete_addr: *mut u8,
+        concrete_length: usize,
+        little_endian: bool,
+    ), $c_name:ident; $rt_cb:path) => {
+        #[allow(clippy::missing_safety_doc)]
+        #[no_mangle]
+        pub unsafe extern "C" fn _rsym_backend_write_memory(
+            symbolic_addr_expr: Option<RSymExpr>,
+            written_expr: Option<RSymExpr>,
+            concrete_addr: *mut u8,
+            concrete_length: usize,
+            little_endian: bool,
+        ) {
+            $rt_cb(|rt| {
+                rt.backend_write_memory(symbolic_addr_expr, written_expr, concrete_addr, concrete_length, little_endian);
+            })
+        }
+    };
+    (pub fn backend_memcpy(
+        sym_dest: RSymExpr,
+        sym_src: RSymExpr,
+        sym_len: RSymExpr,
+        dest: *mut u8,
+        src: *const u8,
+        length: usize,
+    ), $c_name:ident; $rt_cb:path) => {
+        #[allow(clippy::missing_safety_doc)]
+        #[no_mangle]
+        pub unsafe extern "C" fn _rsym_backend_memcpy(
+            sym_dest: Option<RSymExpr>,
+            sym_src: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            dest: *mut u8,
+            src: *const u8,
+            length: usize,
+        ) {
+            $rt_cb(|rt| {
+                rt.backend_memcpy(sym_dest, sym_src, sym_len, dest, src, length);
+            })
+        }
+    };
+    (pub fn backend_memmove(
+        sym_dest: RSymExpr,
+        sym_src: RSymExpr,
+        sym_len: RSymExpr,
+        dest: *mut u8,
+        src: *const u8,
+        length: usize,
+    ), $c_name:ident; $rt_cb:path) => {
+        #[allow(clippy::missing_safety_doc)]
+        #[no_mangle]
+        pub unsafe extern "C" fn _rsym_backend_memmove(
+            sym_dest: Option<RSymExpr>,
+            sym_src: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            dest: *mut u8,
+            src: *const u8,
+            length: usize,
+        ) {
+            $rt_cb(|rt| {
+                rt.backend_memmove(sym_dest, sym_src, sym_len, dest, src, length);
+            })
+        }
+    };
+    (pub fn backend_memset(
+        sym_dest: RSymExpr,
+        sym_val: RSymExpr,
+        sym_len: RSymExpr,
+        memory: *mut u8,
+        value: ::std::os::raw::c_int,
+        length: usize,
+    ), $c_name:ident; $rt_cb:path) => {
+        #[allow(clippy::missing_safety_doc)]
+        #[no_mangle]
+        pub unsafe extern "C" fn _rsym_backend_memset(
+            sym_dest: Option<RSymExpr>,
+            sym_val: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            memory: *mut u8,
+            value: ::std::os::raw::c_int,
+            length: usize,
+        ) {
+            $rt_cb(|rt| {
+                rt.backend_memset(sym_dest, sym_val, sym_len, memory, value, length);
+            })
+        }
+    };
+
     // all other methods are handled by this
     (pub fn $name:ident($( $arg:ident : $(::)?$($type:ident)::+ ),*$(,)?)$( -> $($ret:ident)::+)?, $c_name:ident; $rt_cb:path) => {
+        // compile_error!(stringify!($c_name));
         #[allow(clippy::missing_safety_doc)]
         #[no_mangle]
         pub unsafe extern "C" fn $c_name( $($arg: $crate::make_symexpr_optional!($($type)::+),)* )$( -> $crate::make_symexpr_optional!($($ret)::+))? {
@@ -174,7 +425,114 @@ macro_rules! impl_nop_runtime_fn {
         fn expression_unreachable(&mut self, _exprs: &[RSymExpr]) {std::default::Default::default()}
     };
 
+    (pub fn backend_read_memory(
+        addr_expr: RSymExpr,
+        concolic_read_value: RSymExpr,
+        addr: *mut u8,
+        length: usize,
+        little_endian: bool,
+    ) -> RSymExpr, $c_name:ident; ) => {
+        #[allow(clippy::default_trait_access)]
+        #[allow(unused_variables)]
+        fn backend_read_memory(
+            &mut self,
+            addr_expr: Option<RSymExpr>,
+            concolic_read_value: Option<RSymExpr>,
+            addr: *mut u8,
+            length: usize,
+            little_endian: bool,
+        ) -> Option<RSymExpr> {
+            // by default, we just return the concolic expression the runtime created for us.
+            concolic_read_value
+        }
+    };
+
+    (pub fn backend_write_memory(
+        symbolic_addr_expr: RSymExpr,
+        written_expr: RSymExpr,
+        concrete_addr: *mut u8,
+        concrete_length: usize,
+        little_endian: bool,
+    ), $c_name:ident; ) => {
+        #[allow(unused_variables)]
+        fn backend_write_memory(
+            &mut self,
+            symbolic_addr_expr: Option<RSymExpr>,
+            written_expr: Option<RSymExpr>,
+            concrete_addr: *mut u8,
+            concrete_length: usize,
+            little_endian: bool,
+        )
+        { }
+    };
+
+    (pub fn backend_memcpy(
+        sym_dest: RSymExpr,
+        sym_src: RSymExpr,
+        sym_len: RSymExpr,
+        dest: *mut u8,
+        src: *const u8,
+        length: usize,
+    ), $c_name:ident;) => {
+        #[allow(clippy::default_trait_access)]
+        #[allow(unused_variables)]
+        fn backend_memcpy(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_src: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            dest: *mut u8,
+            src: *const u8,
+            length: usize,
+        )
+        { }
+    };
+    (pub fn backend_memmove(
+        sym_dest: RSymExpr,
+        sym_src: RSymExpr,
+        sym_len: RSymExpr,
+        dest: *mut u8,
+        src: *const u8,
+        length: usize,
+    ), $c_name:ident;) => {
+        #[allow(clippy::default_trait_access)]
+        #[allow(unused_variables)]
+        fn backend_memmove(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_src: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            dest: *mut u8,
+            src: *const u8,
+            length: usize,
+        )
+        { }
+    };
+    (pub fn backend_memset(
+        sym_dest: RSymExpr,
+        sym_val: RSymExpr,
+        sym_len: RSymExpr,
+        memory: *mut u8,
+        value: ::std::os::raw::c_int,
+        length: usize,
+    ), $c_name:ident;) => {
+        #[allow(clippy::default_trait_access)]
+        #[allow(unused_variables)]
+        fn backend_memset(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_val: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            memory: *mut u8,
+            value: ::std::os::raw::c_int,
+            length: usize,
+        )
+        { }
+    };
+
     (pub fn $name:ident($( $arg:ident : $type:ty ),*$(,)?)$( -> $ret:ty)?, $c_name:ident;) => {
+        // error with the matched string
+        // compile_error!(stringify!(fn $name(&mut self, $( $arg : $type),*)$( -> Option<$ret>)?));
         #[allow(clippy::default_trait_access)]
         fn $name(&mut self, $( _ : $type),*)$( -> Option<$ret>)? {std::default::Default::default()}
     };
@@ -213,7 +571,148 @@ macro_rules! rust_runtime_function_declaration {
         }
     };
 
+    (pub fn notify_param_expr(index: u8, expr: RSymExpr), $c_name:ident;) => {
+        #[allow(clippy::default_trait_access)]
+        fn notify_param_expr(&mut self, index: u8, expr: RSymExpr) {
+            if let Some(inner) = &mut self.inner {
+                inner.notify_param_expr(index, expr);
+            }
+        }
+    };
+
+    (pub fn notify_ret_expr(expr: RSymExpr), $c_name:ident;) => {
+        #[allow(clippy::default_trait_access)]
+        fn notify_ret_expr(&mut self, expr: RSymExpr) {
+            if let Some(inner) = &mut self.inner {
+                inner.notify_ret_expr(expr);
+            }
+        }
+    };
+    (pub fn concretize_pointer(expr: RSymExpr, ptr: usize), $c_name:ident;) => {
+        #[allow(clippy::default_trait_access)]
+        fn concretize_pointer(&mut self, expr: RSymExpr, ptr: usize) {
+            if let Some(inner) = &mut self.inner {
+                inner.concretize_pointer(expr, ptr);
+            }
+        }
+    };
+
+    (pub fn backend_read_memory(
+        addr_expr: RSymExpr,
+        concolic_read_value: RSymExpr,
+        addr: *mut u8,
+        length: usize,
+        little_endian: bool,
+    ) -> RSymExpr, $c_name:ident; ) => {
+        #[allow(clippy::default_trait_access)]
+        fn backend_read_memory(
+            &mut self,
+            addr_expr: Option<RSymExpr>,
+            concolic_read_value: Option<RSymExpr>,
+            addr: *mut u8,
+            length: usize,
+            little_endian: bool,
+        ) -> Option<RSymExpr> {
+            if let Some(inner) = &mut self.inner {
+                return inner.backend_read_memory(addr_expr, concolic_read_value, addr, length, little_endian);
+            }
+            concolic_read_value
+        }
+    };
+
+    (pub fn backend_write_memory(
+        symbolic_addr_expr: RSymExpr,
+        written_expr: RSymExpr,
+        concrete_addr: *mut u8,
+        concrete_length: usize,
+        little_endian: bool,
+    ), $c_name:ident;) => {
+        fn backend_write_memory(
+            &mut self,
+            symbolic_addr_expr: Option<RSymExpr>,
+            written_expr: Option<RSymExpr>,
+            concrete_addr: *mut u8,
+            concrete_length: usize,
+            little_endian: bool,
+        ) {
+            if let Some(inner) = &mut self.inner {
+                inner.backend_write_memory(symbolic_addr_expr, written_expr, concrete_addr, concrete_length, little_endian);
+            }
+        }
+    };
+
+    (pub fn backend_memcpy(
+        sym_dest: RSymExpr,
+        sym_src: RSymExpr,
+        sym_len: RSymExpr,
+        dest: *mut u8,
+        src: *const u8,
+        length: usize,
+    ), $c_name:ident;) => {
+        #[allow(clippy::default_trait_access)]
+        fn backend_memcpy(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_src: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            dest: *mut u8,
+            src: *const u8,
+            length: usize,
+        ) {
+            if let Some(inner) = &mut self.inner {
+                inner.backend_memcpy(sym_dest, sym_src, sym_len, dest, src, length);
+            }
+        }
+    };
+    (pub fn backend_memmove(
+        sym_dest: RSymExpr,
+        sym_src: RSymExpr,
+        sym_len: RSymExpr,
+        dest: *mut u8,
+        src: *const u8,
+        length: usize,
+    ), $c_name:ident;) => {
+        #[allow(clippy::default_trait_access)]
+        fn backend_memmove(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_src: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            dest: *mut u8,
+            src: *const u8,
+            length: usize,
+        ) {
+            if let Some(inner) = &mut self.inner {
+                inner.backend_memmove(sym_dest, sym_src, sym_len, dest, src, length);
+            }
+        }
+    };
+    (pub fn backend_memset(
+        sym_dest: RSymExpr,
+        sym_val: RSymExpr,
+        sym_len: RSymExpr,
+        memory: *mut u8,
+        value: ::std::os::raw::c_int,
+        length: usize,
+    ), $c_name:ident;) => {
+        #[allow(clippy::default_trait_access)]
+        fn backend_memset(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_val: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            memory: *mut u8,
+            value: ::std::os::raw::c_int,
+            length: usize,
+        ) {
+            if let Some(inner) = &mut self.inner {
+                inner.backend_memset(sym_dest, sym_val, sym_len, memory, value, length);
+            }
+        }
+    };
+
     (pub fn $name:ident($( $arg:ident : $type:ty ),*$(,)?) -> $ret:ty,  $c_name:ident;) => {
+        // compile_error!(stringify!($name));
         fn $name(&mut self, $( $arg : $type),*) -> Option<$ret> {
             if let Some(inner) = &mut self.inner {
                 inner.$name($($arg,)*)
@@ -224,6 +723,7 @@ macro_rules! rust_runtime_function_declaration {
     };
 
     (pub fn $name:ident($( $arg:ident : $type:ty ),*$(,)?), $c_name:ident;) => {
+        // compile_error!(stringify!($name));
         fn $name(&mut self, $( $arg : $type),*) {
             if let Some(inner) = &mut self.inner {
                 inner.$name($($arg,)*);

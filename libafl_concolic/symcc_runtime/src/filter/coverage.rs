@@ -86,7 +86,8 @@ impl<THasher: Hasher, THashBuilder: BuildHasher> CallStackCoverage<THasher, THas
             let index: usize = (hash % MAP_SIZE as u64).try_into().unwrap();
             let value = self.bitmap[index] / 8;
             self.is_interesting = value == 0 || value.is_power_of_two();
-            *self.bitmap.get_mut(index).unwrap() += 1;
+            let bitmap_loc = self.bitmap.get_mut(index).unwrap();
+            *bitmap_loc = (*bitmap_loc).saturating_add(1);
         }
     }
 
@@ -119,10 +120,126 @@ macro_rules! call_stack_coverage_filter_function_implementation {
         }
     };
 
+    (pub fn notify_param_expr(index: u8, value: *mut RSymExpr), $c_name:ident;) => {
+        fn notify_param_expr(&mut self, _index: u8, _value: *mut RSymExpr) {
+
+        }
+    };
+
+    (pub fn notify_ret_expr(value: *mut RSymExpr), $c_name:ident;) => {
+        fn notify_ret_expr(&mut self, _value: *mut RSymExpr) {
+
+        }
+    };
+
     (pub fn push_path_constraint($( $arg:ident : $type:ty ),*$(,)?), $c_name:ident;) => {
         fn push_path_constraint(&mut self, $( _ : $type ),*) -> bool {
             self.update_bitmap();
             self.is_interesting()
+        }
+    };
+    (pub fn backend_read_memory(
+        addr_expr: RSymExpr,
+        concolic_read_value: RSymExpr,
+        addr: *mut u8,
+        length: usize,
+        little_endian: bool,
+    ) -> RSymExpr, $c_name:ident; ) => {
+        #[allow(clippy::default_trait_access)]
+        #[allow(unused_variables)]
+        fn backend_read_memory(
+            &mut self,
+            addr_expr: Option<RSymExpr>,
+            concolic_read_value: Option<RSymExpr>,
+            addr: *mut u8,
+            length: usize,
+            little_endian: bool,
+        ) -> bool {
+            return true;
+        }
+    };
+
+    (pub fn backend_write_memory(
+        symbolic_addr_expr: RSymExpr,
+        written_expr: RSymExpr,
+        concrete_addr: *mut u8,
+        concrete_length: usize,
+        little_endian: bool,
+    ), $c_name:ident; ) => {
+        #[allow(unused_variables)]
+        fn backend_write_memory(
+            &mut self,
+            symbolic_addr_expr: Option<RSymExpr>,
+            written_expr: Option<RSymExpr>,
+            concrete_addr: *mut u8,
+            concrete_length: usize,
+            little_endian: bool,
+        ) -> bool {
+            return true;
+        }
+    };
+
+    (pub fn backend_memcpy(
+        sym_dest: RSymExpr,
+        sym_src: RSymExpr,
+        sym_len: RSymExpr,
+        dest: *mut u8,
+        src: *const u8,
+        length: usize,
+    ), $c_name:ident;) => {
+        #[allow(unused_variables)]
+        fn backend_memcpy(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_src: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            dest: *mut u8,
+            src: *const u8,
+            length: usize,
+        ) -> bool {
+            return true;
+        }
+    };
+    (pub fn backend_memmove(
+        sym_dest: RSymExpr,
+        sym_src: RSymExpr,
+        sym_len: RSymExpr,
+        dest: *mut u8,
+        src: *const u8,
+        length: usize,
+    ), $c_name:ident;) => {
+        #[allow(unused_variables)]
+        fn backend_memmove(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_src: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            dest: *mut u8,
+            src: *const u8,
+            length: usize,
+        ) -> bool {
+            return true;
+        }
+    };
+    (pub fn backend_memset(
+        sym_dest: RSymExpr,
+        sym_val: RSymExpr,
+        sym_len: RSymExpr,
+        memory: *mut u8,
+        value: ::std::os::raw::c_int,
+        length: usize,
+    ), $c_name:ident;) => {
+        #[allow(unused_variables)]
+        fn backend_memset(
+            &mut self,
+            sym_dest: Option<RSymExpr>,
+            sym_val: Option<RSymExpr>,
+            sym_len: Option<RSymExpr>,
+            memory: *mut u8,
+            value: ::std::os::raw::c_int,
+            length: usize,
+        ) -> bool {
+            return true;
         }
     };
 

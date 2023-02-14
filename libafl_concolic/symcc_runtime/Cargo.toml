@@ -16,9 +16,12 @@ categories = ["development-tools::testing", "emulators", "embedded", "os", "no-s
 
 [features]
 # skips building and linking the C++ part of the runtime
+default = ["concolic_expression_caching"]
 no-cpp-runtime = []
+concolic_expression_caching = []
 
 [dependencies]
+lru = "*"
 unchecked_unwrap = "4"
 ctor = "0.1"
 libc = "0.2"
