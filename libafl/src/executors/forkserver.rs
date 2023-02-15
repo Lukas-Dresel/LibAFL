@@ -772,10 +772,10 @@ impl<'a, SP> ForkserverExecutorBuilder<'a, SP> {
                 self.map_size = Some(map_size as usize);
             }
 
-            // // let send_len = forkserver.write_ctl(send_status)?;
-            // if send_len != 4 {
-            //     return Err(Error::unknown("Writing to forkserver failed.".to_string()));
-            // }
+            // let send_len = forkserver.write_ctl(send_status)?;
+            if send_len != 4 {
+                return Err(Error::unknown("Writing to forkserver failed.".to_string()));
+            }
 
             if (send_status & FS_OPT_AUTODICT) == FS_OPT_AUTODICT {
                 let (read_len, dict_size) = forkserver.read_st()?;
