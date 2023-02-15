@@ -988,10 +988,10 @@ where
                 send_status |= FS_OPT_AUTODICT;
             }
 
-            // // let send_len = forkserver.write_ctl(send_status)?;
-            // if send_len != 4 {
-            //     return Err(Error::unknown("Writing to forkserver failed.".to_string()));
-            // }
+            // let send_len = forkserver.write_ctl(send_status)?;
+            if send_len != 4 {
+                return Err(Error::unknown("Writing to forkserver failed.".to_string()));
+            }
 
                 let send_len = forkserver.write_ctl(send_status)?;
                 if send_len != 4 {
