@@ -32,7 +32,7 @@ use crate::{
         AsMutSlice, AsSlice,
     },
     executors::{Executor, ExitKind, HasObservers},
-    inputs::{HasTargetBytes, Input, UsesInput},
+    inputs::{HasTargetBytes, Input, UsesInput, BytesInput},
     mutators::Tokens,
     observers::{
         get_asan_runtime_flags_with_log_path, AsanBacktraceObserver, MapObserver, Observer,
@@ -582,6 +582,86 @@ where
     /// The coverage map size if specified by the target
     pub fn coverage_map_size(&self) -> Option<usize> {
         self.map_size
+    }
+    #[inline]
+    pub fn execute_input(
+        &mut self,
+        input: &BytesInput,
+    ) -> Result<ExitKind, Error> {
+        let mut exit_kind = ExitKind::Ok;
+
+        // Write to testcase
+        if self.uses_shmem_testcase {
+            let map = unsafe { self.map.as_mut().unwrap_unchecked() };
+            let target_bytes = input.target_bytes();
+            let mut size = target_bytes.as_slice().len();
+            if size > MAX_FILE {
+                // Truncate like AFL++ does
+                size = MAX_FILE;
+            }
+            let size_in_bytes = size.to_ne_bytes();
+            // The first four bytes tells the size of the shmem.
+            map.as_mut_slice()[..SHMEM_FUZZ_HDR_SIZE]
+                .copy_from_slice(&size_in_bytes[..SHMEM_FUZZ_HDR_SIZE]);
+            map.as_mut_slice()[SHMEM_FUZZ_HDR_SIZE..(SHMEM_FUZZ_HDR_SIZE + size)]
+                .copy_from_slice(target_bytes.as_slice());
+        } else {
+            self.input_file.write_buf(input.target_bytes().as_slice())?;
+        }
+
+        let send_len = self
+            .forkserver
+            .write_ctl(self.forkserver().last_run_timed_out())?;
+        if send_len != 4 {
+            return Err(Error::illegal_state(
+                "Unable to request new process from fork server (OOM?)".to_string(),
+            ));
+        }
+
+        let (recv_pid_len, pid) = self.forkserver.read_st()?;
+        if recv_pid_len != 4 {
+            return Err(Error::illegal_state(
+                "Unable to request new process from fork server (OOM?)".to_string(),
+            ));
+        }
+
+        if pid <= 0 {
+            return Err(Error::unknown(
+                "Fork server is misbehaving (OOM?)".to_string(),
+            ));
+        }
+
+        self.forkserver.set_child_pid(Pid::from_raw(pid));
+
+        let (recv_status_len, status) = self.forkserver.read_st()?;
+        if recv_status_len != 4 {
+            return Err(Error::unknown(
+                "Unable to communicate with fork server (OOM?)".to_string(),
+            ));
+        }
+
+        self.forkserver.set_status(status);
+
+        if libc::WIFSIGNALED(self.forkserver.status()) {
+            exit_kind = ExitKind::Crash;
+            if self.has_asan_observer.is_none() {
+                self.has_asan_observer = Some(
+                    self.observers()
+                        .match_name::<AsanBacktraceObserver>("AsanBacktraceObserver")
+                        .is_some(),
+                );
+            }
+            if self.has_asan_observer.unwrap() {
+                self.observers_mut()
+                    .match_name_mut::<AsanBacktraceObserver>("AsanBacktraceObserver")
+                    .unwrap()
+                    .parse_asan_output_from_asan_log_file(pid)?;
+            }
+        }
+
+        self.forkserver.set_child_pid(Pid::from_raw(0));
+
+        Ok(exit_kind)
     }
 }
 
