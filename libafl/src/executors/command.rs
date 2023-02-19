@@ -316,7 +316,7 @@ where
         let mut child = self.configurer.spawn_child(input)?;
 
         let res = match child
-            .wait_timeout(Duration::from_secs(5))
+            .wait_timeout(Duration::from_secs(3))
             .expect("waiting on child failed")
             .map(|status| status.signal())
         {

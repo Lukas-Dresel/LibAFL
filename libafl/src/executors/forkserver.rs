@@ -4,7 +4,7 @@ use alloc::{borrow::ToOwned, string::ToString, vec::Vec};
 use core::{
     fmt::{self, Debug, Formatter},
     marker::PhantomData,
-    time::Duration,
+    time::Duration, cmp::min,
 };
 use std::{
     ffi::{OsStr, OsString},
@@ -65,7 +65,7 @@ const fn fs_opt_get_mapsize(x: i32) -> i32 {
 
 /// The length of header bytes which tells shmem size
 const SHMEM_FUZZ_HDR_SIZE: usize = 4;
-const MAX_FILE: usize = 1024 * 1024;
+const MAX_FILE: usize = 1024 * 1024 * 1024;
 
 /// Configure the target, `limit`, `setsid`, `pipe_stdin`, the code was borrowed from the [`Angora`](https://github.com/AngoraFuzzer/Angora) fuzzer
 pub trait ConfigTarget {
@@ -441,7 +441,7 @@ where
             // The first four bytes tells the size of the shmem.
             shmem.as_mut_slice()[..4].copy_from_slice(&size_in_bytes[..4]);
             shmem.as_mut_slice()[SHMEM_FUZZ_HDR_SIZE..(SHMEM_FUZZ_HDR_SIZE + size)]
-                .copy_from_slice(target_bytes.as_slice());
+                .copy_from_slice(&target_bytes.as_slice()[..min(size, MAX_FILE - SHMEM_FUZZ_HDR_SIZE)]);
         } else {
             self.executor
                 .input_file_mut()

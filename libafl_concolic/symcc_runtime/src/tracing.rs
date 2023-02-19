@@ -1,6 +1,6 @@
 //! Tracing of expressions in a serialized form.
 
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, arch::asm};
 
 pub use libafl::observers::concolic::serialization_format::StdShMemMessageFileWriter;
 use libafl::observers::concolic::SymExpr;
@@ -299,6 +299,7 @@ impl Runtime for TracingRuntime {
     }
 
     fn notify_ret_expr(&mut self, expr: RSymExpr) {
+        if expr.get() > 0x100000 { unsafe { asm!("int3"); } }
         self.write_message(SymExpr::SetReturnValue { expr });
     }
 
