@@ -281,7 +281,7 @@ macro_rules! export_rust_runtime_fn {
     (pub fn notify_ret_expr(expr: RSymExpr), $c_name:ident; $rt_cb:path) => {
         #[allow(clippy::missing_safety_doc)]
         #[no_mangle]
-        pub unsafe extern "C" fn _rsym_notify_ret_expr(index: u8, expr: Option<RSymExpr>) {
+        pub unsafe extern "C" fn _rsym_notify_ret_expr(expr: Option<RSymExpr>) {
             $rt_cb(|rt| {
                 if let Some(expr) = expr {
                     rt.notify_ret_expr(expr);

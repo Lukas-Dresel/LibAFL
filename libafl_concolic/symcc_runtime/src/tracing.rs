@@ -299,7 +299,6 @@ impl Runtime for TracingRuntime {
     }
 
     fn notify_ret_expr(&mut self, expr: RSymExpr) {
-        if expr.get() > 0x100000 { unsafe { asm!("int3"); } }
         self.write_message(SymExpr::SetReturnValue { expr });
     }
 
