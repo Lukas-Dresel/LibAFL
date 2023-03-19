@@ -8,6 +8,7 @@ use std::{
     vec::Vec,
 };
 
+use itertools::Itertools;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 #[cfg(test)]
@@ -385,7 +386,7 @@ where
 
     /// List initial inputs from a directory.
     fn visit_initial_directory(files: &mut Vec<PathBuf>, in_dir: &Path) -> Result<(), Error> {
-        for entry in fs::read_dir(in_dir)? {
+        for entry in fs::read_dir(in_dir)?.sorted_by_cached_key(|x| x.as_ref().map(|x| x.path()).ok()).rev() {
             let entry = entry?;
             let path = entry.path();
             if path.file_name().unwrap().to_string_lossy().starts_with('.') {
