@@ -15,12 +15,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+<<<<<<< HEAD
 #[cfg(feature = "std")]
 use libafl_bolts::core_affinity::{CoreId, Cores};
 use libafl_bolts::{
     rands::{Rand, StdRand},
     serdeany::{NamedSerdeAnyMap, SerdeAnyMap},
 };
+=======
+use itertools::Itertools;
+>>>>>>> f5bdfad8 (deterministic load order of the initial inputs)
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 mod stack;
@@ -681,6 +685,7 @@ where
                 } else if attr.is_dir() {
                     let files = self.remaining_initial_files.as_mut().unwrap();
                     path.read_dir()?
+                        .sorted_by_cached_key(|x| x.as_ref().map(|x| x.path()).ok()).rev()
                         .try_for_each(|entry| entry.map(|e| files.push(e.path())))?;
                 } else if attr.is_symlink() {
                     let path = fs::canonicalize(path)?;
