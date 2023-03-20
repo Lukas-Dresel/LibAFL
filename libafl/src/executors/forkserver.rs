@@ -889,10 +889,19 @@ impl<'a, SP> ForkserverExecutorBuilder<'a, SP> {
 
         let (rlen, start_constant) = forkserver.read_st()?;
         if rlen != 4 {
-            return Err(Error::unknown("Failed to start a forkserver".to_string()));
+            // use nonblocking waitpid to check if the forkserver is still alive
+            let status_maybe = nix::sys::wait::waitpid(forkserver.child_pid(), Some(nix::sys::wait::WaitPidFlag::WNOHANG)).expect("nonblocking waitpid failed when trying to get an error code for the forkserver??");
+
+            let msg = format!(
+                "Failed to start the forkserver, could not read start constant: got {} bytes from {:?}, status: {:?}",
+                rlen, forkserver, status_maybe);
+            return Err(Error::unknown(msg));
         }
         if (start_constant as u32) != 0x4269dead {
-            return Err(Error::unknown("Forkserver desync: Start constant does not match??".to_string()))
+            return Err(Error::unknown(format!(
+                "Forkserver desync: Start constant does not match?? Got {:#x}, expected {:#?}",
+                start_constant, 0x4269dead
+            )));
         }
         let send_len = forkserver.write_ctl(0x4269dead)?;
         if send_len != 4 {
