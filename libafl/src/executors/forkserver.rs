@@ -756,7 +756,8 @@ impl<'a, SP> ForkserverExecutorBuilder<'a, SP> {
         );
 
         if let Some(dynamic_map_size) = self.map_size {
-            map_observer.downsize_map(dynamic_map_size);
+            assert!(self.real_map_size > 0 && self.real_map_size as usize % std::mem::size_of::<MO::Entry>() == 0);
+            map_observer.downsize_map(dynamic_map_size / std::mem::size_of::<MO::Entry>());
         }
 
         let observers: (MO, OT) = other_observers.prepend(map_observer);
