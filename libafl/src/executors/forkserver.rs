@@ -395,7 +395,11 @@ pub struct TimeoutForkserverExecutor<E> {
     signal: Signal,
 }
 
-impl<E> TimeoutForkserverExecutor<E> {
+impl<E> TimeoutForkserverExecutor<E>
+where
+    E: HasForkserver + UsesInput,
+    E::Input : HasTargetBytes
+{
     /// Create a new [`TimeoutForkserverExecutor`]
     pub fn new(executor: E, exec_tmout: Duration) -> Result<Self, Error> {
         let signal = Signal::SIGKILL;
@@ -412,22 +416,10 @@ impl<E> TimeoutForkserverExecutor<E> {
             signal,
         })
     }
-}
-
-impl<E, EM, Z> Executor<EM, Z> for TimeoutForkserverExecutor<E>
-where
-    E: Executor<EM, Z> + HasForkserver + Debug,
-    E::Input: HasTargetBytes,
-    EM: UsesState<State = E::State>,
-    Z: UsesState<State = E::State>,
-{
     #[inline]
-    fn run_target(
+    pub fn execute_input(
         &mut self,
-        _fuzzer: &mut Z,
-        _state: &mut Self::State,
-        _mgr: &mut EM,
-        input: &Self::Input,
+        input: &<E as UsesInput>::Input,
     ) -> Result<ExitKind, Error> {
         let mut exit_kind = ExitKind::Ok;
 
@@ -507,6 +499,25 @@ where
     }
 }
 
+impl<E, EM, Z> Executor<EM, Z> for TimeoutForkserverExecutor<E>
+where
+    E: Executor<EM, Z> + HasForkserver + Debug,
+    E::Input: HasTargetBytes,
+    EM: UsesState<State = E::State>,
+    Z: UsesState<State = E::State>,
+{
+    #[inline]
+    fn run_target(
+        &mut self,
+        _fuzzer: &mut Z,
+        _state: &mut Self::State,
+        _mgr: &mut EM,
+        input: &Self::Input,
+    ) -> Result<ExitKind, Error> {
+        self.execute_input(input)
+    }
+}
+
 /// This [`Executor`] can run binaries compiled for AFL/AFL++ that make use of a forkserver.
 /// Shared memory feature is also available, but you have to set things up in your code.
 /// Please refer to AFL++'s docs. <https://github.com/AFLplusplus/AFLplusplus/blob/stable/instrumentation/README.persistent_mode.md>
@@ -557,6 +568,7 @@ impl<OT, S, SP> ForkserverExecutor<OT, S, SP>
 where
     OT: ObserversTuple<S>,
     S: UsesInput,
+    <S as UsesInput>::Input: HasTargetBytes,
     SP: ShMemProvider,
 {
     /// The `target` binary that's going to run.
@@ -586,7 +598,7 @@ where
     #[inline]
     pub fn execute_input(
         &mut self,
-        input: &BytesInput,
+        input: &S::Input,
     ) -> Result<ExitKind, Error> {
         let mut exit_kind = ExitKind::Ok;
 
@@ -1126,80 +1138,7 @@ where
         _mgr: &mut EM,
         input: &Self::Input,
     ) -> Result<ExitKind, Error> {
-        let mut exit_kind = ExitKind::Ok;
-
-        // Write to testcase
-        if self.uses_shmem_testcase {
-            let map = unsafe { self.map.as_mut().unwrap_unchecked() };
-            let target_bytes = input.target_bytes();
-            let mut size = target_bytes.as_slice().len();
-            if size > MAX_FILE {
-                // Truncate like AFL++ does
-                size = MAX_FILE;
-            }
-            let size_in_bytes = size.to_ne_bytes();
-            // The first four bytes tells the size of the shmem.
-            map.as_mut_slice()[..SHMEM_FUZZ_HDR_SIZE]
-                .copy_from_slice(&size_in_bytes[..SHMEM_FUZZ_HDR_SIZE]);
-            map.as_mut_slice()[SHMEM_FUZZ_HDR_SIZE..(SHMEM_FUZZ_HDR_SIZE + size)]
-                .copy_from_slice(target_bytes.as_slice());
-        } else {
-            self.input_file.write_buf(input.target_bytes().as_slice())?;
-        }
-
-        let send_len = self
-            .forkserver
-            .write_ctl(self.forkserver().last_run_timed_out())?;
-        if send_len != 4 {
-            return Err(Error::illegal_state(
-                "Unable to request new process from fork server (OOM?)".to_string(),
-            ));
-        }
-
-        let (recv_pid_len, pid) = self.forkserver.read_st()?;
-        if recv_pid_len != 4 {
-            return Err(Error::illegal_state(
-                "Unable to request new process from fork server (OOM?)".to_string(),
-            ));
-        }
-
-        if pid <= 0 {
-            return Err(Error::unknown(
-                "Fork server is misbehaving (OOM?)".to_string(),
-            ));
-        }
-
-        self.forkserver.set_child_pid(Pid::from_raw(pid));
-
-        let (recv_status_len, status) = self.forkserver.read_st()?;
-        if recv_status_len != 4 {
-            return Err(Error::unknown(
-                "Unable to communicate with fork server (OOM?)".to_string(),
-            ));
-        }
-
-        self.forkserver.set_status(status);
-
-        if libc::WIFSIGNALED(self.forkserver.status()) {
-            exit_kind = ExitKind::Crash;
-            if self.has_asan_observer.is_none() {
-                self.has_asan_observer = Some(
-                    self.observers()
-                        .match_name::<AsanBacktraceObserver>("AsanBacktraceObserver")
-                        .is_some(),
-                );
-            }
-            if self.has_asan_observer.unwrap() {
-                self.observers_mut()
-                    .match_name_mut::<AsanBacktraceObserver>("AsanBacktraceObserver")
-                    .unwrap()
-                    .parse_asan_output_from_asan_log_file(pid)?;
-            }
-        }
-
-        self.forkserver.set_child_pid(Pid::from_raw(0));
-
-        Ok(exit_kind)
+        self.execute_input(input)
     }
 }
 
