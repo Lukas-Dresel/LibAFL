@@ -977,7 +977,9 @@ where
         );
 
         if let Some(dynamic_map_size) = self.map_size {
-            map_observer.as_mut().truncate(dynamic_map_size);
+            // map_observer.as_mut().truncate(dynamic_map_size);
+            assert!(self.real_map_size > 0 && self.real_map_size as usize % std::mem::size_of::<MO::Entry>() == 0);
+            map_observer.truncate(dynamic_map_size / std::mem::size_of::<MO::Entry>());
         }
 
         let observers = (map_observer, other_observers);
