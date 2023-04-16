@@ -9,7 +9,7 @@ use crate::{
     corpus::Corpus,
     inputs::{GeneralizedInputMetadata, GeneralizedItem},
     mutators::{token_mutations::Tokens, MutationResult, Mutator},
-    stages::generalization::GeneralizedIndexesMetadata,
+    random_corpus_id,
     state::{HasCorpus, HasMetadata, HasRand},
     Error,
 };
@@ -22,66 +22,52 @@ fn extend_with_random_generalized<S>(
     state: &mut S,
     items: &mut Vec<GeneralizedItem>,
     gap_indices: &mut Vec<usize>,
-) -> Result<(), Error>
+) -> Result<MutationResult, Error>
 where
     S: HasMetadata + HasRand + HasCorpus,
 {
-    let rand_idx = state.rand_mut().next() as usize;
-
-    let idx = {
-        let meta = state.metadata_mut().get_mut::<GeneralizedIndexesMetadata>().ok_or_else(|| {
-            Error::key_not_found("GeneralizedIndexesMetadata needed by extend_with_random_generalized() not found, make sure that you have GeneralizationStage in")
-        })?;
-
-        *meta
-            .indexes
-            .iter()
-            .nth(rand_idx % meta.indexes.len())
-            .unwrap()
-    };
+    let idx = random_corpus_id!(state.corpus(), state.rand_mut());
 
     if state.rand_mut().below(100) > CHOOSE_SUBINPUT_PROB {
         if state.rand_mut().below(100) < 50 {
             let rand1 = state.rand_mut().next() as usize;
             let rand2 = state.rand_mut().next() as usize;
 
-            let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
+            let other_testcase = state.corpus().get(idx)?.borrow();
             if let Some(other) = other_testcase
-                .metadata_mut()
+                .metadata_map()
                 .get::<GeneralizedInputMetadata>()
             {
-                if other.generalized_len() > 0 {
-                    let gen = other.generalized();
+                let gen = other.generalized();
 
-                    for (i, _) in gen
-                        .iter()
-                        .enumerate()
-                        .filter(|&(_, x)| *x == GeneralizedItem::Gap)
-                    {
-                        gap_indices.push(i);
-                    }
-                    let min_idx = gap_indices[rand1 % gap_indices.len()];
-                    let max_idx = gap_indices[rand2 % gap_indices.len()];
-                    let (mut min_idx, max_idx) = (min(min_idx, max_idx), max(min_idx, max_idx));
-
-                    gap_indices.clear();
-
-                    if items.last() == Some(&GeneralizedItem::Gap) {
-                        min_idx += 1;
-                    }
-                    items.extend_from_slice(&gen[min_idx..=max_idx]);
-
-                    debug_assert!(items.first() == Some(&GeneralizedItem::Gap));
-                    debug_assert!(items.last() == Some(&GeneralizedItem::Gap));
-
-                    return Ok(());
+                for (i, _) in gen
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, x)| *x == GeneralizedItem::Gap)
+                {
+                    gap_indices.push(i);
                 }
+                let min_idx = gap_indices[rand1 % gap_indices.len()];
+                let max_idx = gap_indices[rand2 % gap_indices.len()];
+                let (mut min_idx, max_idx) = (min(min_idx, max_idx), max(min_idx, max_idx));
+
+                gap_indices.clear();
+
+                if items.last() == Some(&GeneralizedItem::Gap) {
+                    min_idx += 1;
+                }
+                items.extend_from_slice(&gen[min_idx..=max_idx]);
+
+                debug_assert!(items.first() == Some(&GeneralizedItem::Gap));
+                debug_assert!(items.last() == Some(&GeneralizedItem::Gap));
+
+                return Ok(MutationResult::Mutated);
             }
         }
 
         let rand1 = state.rand_mut().next() as usize;
 
-        if let Some(meta) = state.metadata().get::<Tokens>() {
+        if let Some(meta) = state.metadata_map().get::<Tokens>() {
             if !meta.tokens().is_empty() {
                 let tok = &meta.tokens()[rand1 % meta.tokens().len()];
                 if items.last() != Some(&GeneralizedItem::Gap) {
@@ -93,28 +79,32 @@ where
                 debug_assert!(items.first() == Some(&GeneralizedItem::Gap));
                 debug_assert!(items.last() == Some(&GeneralizedItem::Gap));
 
-                return Ok(());
+                return Ok(MutationResult::Mutated);
             }
         }
     }
 
-    let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
-    let other = other_testcase
-        .metadata_mut()
+    let other_testcase = state.corpus().get(idx)?.borrow();
+    if let Some(other) = other_testcase
+        .metadata_map()
         .get::<GeneralizedInputMetadata>()
-        .unwrap();
-    let gen = other.generalized();
+    {
+        let gen = other.generalized();
 
-    if items.last() == Some(&GeneralizedItem::Gap) && gen.first() == Some(&GeneralizedItem::Gap) {
-        items.extend_from_slice(&gen[1..]);
+        if items.last() == Some(&GeneralizedItem::Gap) && gen.first() == Some(&GeneralizedItem::Gap)
+        {
+            items.extend_from_slice(&gen[1..]);
+        } else {
+            items.extend_from_slice(gen);
+        }
+
+        debug_assert!(items.first() == Some(&GeneralizedItem::Gap));
+        debug_assert!(items.last() == Some(&GeneralizedItem::Gap));
+
+        Ok(MutationResult::Mutated)
     } else {
-        items.extend_from_slice(gen);
+        Ok(MutationResult::Skipped)
     }
-
-    debug_assert!(items.first() == Some(&GeneralizedItem::Gap));
-    debug_assert!(items.last() == Some(&GeneralizedItem::Gap));
-
-    Ok(())
 }
 
 /// Extend the generalized input with another random one from the corpus
@@ -137,9 +127,7 @@ where
             state,
             generalised_meta.generalized_mut(),
             &mut self.gap_indices,
-        )?;
-
-        Ok(MutationResult::Mutated)
+        )
     }
 }
 
@@ -202,7 +190,11 @@ where
             self.scratch.extend_from_slice(&gen[selected + 1..]);
             gen.truncate(selected);
 
-            extend_with_random_generalized(state, gen, &mut self.gap_indices)?;
+            if extend_with_random_generalized(state, gen, &mut self.gap_indices)?
+                == MutationResult::Skipped
+            {
+                gen.push(GeneralizedItem::Gap);
+            }
 
             gen.extend_from_slice(&self.scratch);
             self.scratch.clear();
@@ -246,7 +238,7 @@ where
         _stage_idx: i32,
     ) -> Result<MutationResult, Error> {
         let tokens_len = {
-            let meta = state.metadata().get::<Tokens>();
+            let meta = state.metadata_map().get::<Tokens>();
             if let Some(tokens) = meta {
                 if tokens.is_empty() {
                     return Ok(MutationResult::Skipped);
@@ -266,7 +258,7 @@ where
         let stop_at_first = state.rand_mut().below(100) > 50;
         let mut rand_idx = state.rand_mut().next() as usize;
 
-        let meta = state.metadata().get::<Tokens>().unwrap();
+        let meta = state.metadata_map().get::<Tokens>().unwrap();
         let token_1 = &meta.tokens()[token_find];
         let token_2 = &meta.tokens()[token_replace];
 
@@ -358,10 +350,10 @@ where
     ) -> Result<MutationResult, Error> {
         let gen = generalised_meta.generalized_mut();
 
-        for (i, _) in gen
+        for i in gen
             .iter()
             .enumerate()
-            .filter(|&(_, x)| *x == GeneralizedItem::Gap)
+            .filter_map(|(i, x)| (*x == GeneralizedItem::Gap).then_some(i))
         {
             self.gap_indices.push(i);
         }
@@ -369,6 +361,7 @@ where
             self.gap_indices[state.rand_mut().below(self.gap_indices.len() as u64) as usize];
         let max_idx =
             self.gap_indices[state.rand_mut().below(self.gap_indices.len() as u64) as usize];
+
         let (min_idx, max_idx) = (min(min_idx, max_idx), max(min_idx, max_idx));
 
         self.gap_indices.clear();

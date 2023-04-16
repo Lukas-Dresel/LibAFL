@@ -6,9 +6,6 @@ use alloc::{
 };
 use core::{fmt::Debug, marker::PhantomData};
 
-use hashbrown::HashSet;
-use serde::{Deserialize, Serialize};
-
 #[cfg(feature = "introspection")]
 use crate::monitors::PerfFeature;
 use crate::{
@@ -26,23 +23,6 @@ use crate::{
 };
 
 const MAX_GENERALIZED_LEN: usize = 8192;
-
-/// A state metadata holding the set of indexes related to the generalized corpus entries
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct GeneralizedIndexesMetadata {
-    /// The set of indexes
-    pub indexes: HashSet<CorpusId>,
-}
-
-crate::impl_serdeany!(GeneralizedIndexesMetadata);
-
-impl GeneralizedIndexesMetadata {
-    /// Create the metadata
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
 
 fn increment_by_offset(_list: &[Option<u8>], idx: usize, off: u8) -> usize {
     idx + 1 + off as usize
@@ -97,36 +77,17 @@ where
         manager: &mut EM,
         corpus_idx: CorpusId,
     ) -> Result<(), Error> {
-        if state
-            .metadata()
-            .get::<GeneralizedIndexesMetadata>()
-            .is_none()
-        {
-            state.add_metadata(GeneralizedIndexesMetadata::new());
-        }
-
         let (mut payload, original, novelties) = {
             start_timer!(state);
             state.corpus().get(corpus_idx)?.borrow_mut().load_input()?;
             mark_feature_time!(state, PerfFeature::GetInputFromCorpus);
             let mut entry = state.corpus().get(corpus_idx)?.borrow_mut();
 
-            if entry.metadata().contains::<GeneralizedInputMetadata>() {
-                drop(entry);
-                state
-                    .metadata_mut()
-                    .get_mut::<GeneralizedIndexesMetadata>()
-                    .unwrap()
-                    .indexes
-                    .insert(corpus_idx);
-                return Ok(());
-            }
-
             let input = entry.input_mut().as_mut().unwrap();
 
             let payload: Vec<_> = input.bytes().iter().map(|&x| Some(x)).collect();
             let original = input.clone();
-            let meta = entry.metadata().get::<MapNoveltiesMetadata>().ok_or_else(|| {
+            let meta = entry.metadata_map().get::<MapNoveltiesMetadata>().ok_or_else(|| {
                     Error::key_not_found(format!(
                         "MapNoveltiesMetadata needed for GeneralizationStage not found in testcase #{corpus_idx} (check the arguments of MapFeedback::new(...))"
                     ))
@@ -327,19 +288,12 @@ where
             {
                 let meta = GeneralizedInputMetadata::generalized_from_options(&payload);
 
-                debug_assert!(meta.generalized().first() == Some(&GeneralizedItem::Gap));
-                debug_assert!(meta.generalized().last() == Some(&GeneralizedItem::Gap));
+                assert!(meta.generalized().first() == Some(&GeneralizedItem::Gap));
+                assert!(meta.generalized().last() == Some(&GeneralizedItem::Gap));
 
                 let mut entry = state.corpus().get(corpus_idx)?.borrow_mut();
-                entry.metadata_mut().insert(meta);
+                entry.metadata_map_mut().insert(meta);
             }
-
-            state
-                .metadata_mut()
-                .get_mut::<GeneralizedIndexesMetadata>()
-                .unwrap()
-                .indexes
-                .insert(corpus_idx);
         }
 
         Ok(())

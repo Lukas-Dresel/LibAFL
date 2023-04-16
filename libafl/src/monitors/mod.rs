@@ -23,7 +23,7 @@ pub use disk::{OnDiskJSONMonitor, OnDiskTOMLMonitor};
 use hashbrown::HashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::bolts::{current_time, format_duration_hms};
+use crate::bolts::{current_time, format_duration_hms, ClientId};
 
 #[cfg(feature = "afl_exec_sec")]
 const CLIENT_STATS_TIME_WINDOW_SECS: u64 = 5; // 5 seconds
@@ -90,6 +90,8 @@ pub struct ClientStats {
     pub corpus_size: u64,
     /// The total executions for this client
     pub executions: u64,
+    /// The number of executions of the previous state in case a client decrease the number of execution (e.g when restarting without saving the state)
+    pub prev_state_executions: u64,
     /// The size of the objectives corpus for this client
     pub objective_size: u64,
     /// The last reported executions for this client
@@ -115,17 +117,25 @@ impl ClientStats {
             .checked_sub(self.last_window_time)
             .map_or(0, |d| d.as_secs());
         if diff > CLIENT_STATS_TIME_WINDOW_SECS {
-            let _ = self.execs_per_sec(cur_time);
+            let _: f64 = self.execs_per_sec(cur_time);
             self.last_window_time = cur_time;
             self.last_window_executions = self.executions;
         }
-        self.executions = executions;
+        if self.executions > self.prev_state_executions + executions {
+            // Something is strange here, sum the executions
+            self.prev_state_executions = self.executions;
+        }
+        self.executions = self.prev_state_executions + executions;
     }
 
     /// We got a new information about executions for this client, insert them.
     #[cfg(not(feature = "afl_exec_sec"))]
     pub fn update_executions(&mut self, executions: u64, _cur_time: Duration) {
-        self.executions = executions;
+        if self.executions > self.prev_state_executions + executions {
+            // Something is strange here, sum the executions
+            self.prev_state_executions = self.executions;
+        }
+        self.executions = self.prev_state_executions + executions;
     }
 
     /// We got a new information about corpus size for this client, insert them.
@@ -221,7 +231,7 @@ pub trait Monitor {
     fn start_time(&mut self) -> Duration;
 
     /// Show the monitor to the user
-    fn display(&mut self, event_msg: String, sender_id: u32);
+    fn display(&mut self, event_msg: String, sender_id: ClientId);
 
     /// Amount of elements in the corpus (combined for all children)
     fn corpus_size(&self) -> u64 {
@@ -261,15 +271,15 @@ pub trait Monitor {
     }
 
     /// The client monitor for a specific id, creating new if it doesn't exist
-    fn client_stats_mut_for(&mut self, client_id: u32) -> &mut ClientStats {
+    fn client_stats_mut_for(&mut self, client_id: ClientId) -> &mut ClientStats {
         let client_stat_count = self.client_stats().len();
-        for _ in client_stat_count..(client_id + 1) as usize {
+        for _ in client_stat_count..(client_id.0 + 1) as usize {
             self.client_stats_mut().push(ClientStats {
                 last_window_time: current_time(),
                 ..ClientStats::default()
             });
         }
-        &mut self.client_stats_mut()[client_id as usize]
+        &mut self.client_stats_mut()[client_id.0 as usize]
     }
 }
 
@@ -297,7 +307,7 @@ impl Monitor for NopMonitor {
         self.start_time
     }
 
-    fn display(&mut self, _event_msg: String, _sender_id: u32) {}
+    fn display(&mut self, _event_msg: String, _sender_id: ClientId) {}
 }
 
 impl NopMonitor {
@@ -317,12 +327,22 @@ impl Default for NopMonitor {
     }
 }
 
-#[cfg(feature = "std")]
 /// Tracking monitor during fuzzing that just prints to `stdout`.
-#[derive(Debug, Clone, Default)]
+#[cfg(feature = "std")]
+#[derive(Debug, Clone)]
 pub struct SimplePrintingMonitor {
     start_time: Duration,
     client_stats: Vec<ClientStats>,
+}
+
+#[cfg(feature = "std")]
+impl Default for SimplePrintingMonitor {
+    fn default() -> Self {
+        Self {
+            start_time: current_time(),
+            client_stats: Vec::new(),
+        }
+    }
 }
 
 #[cfg(feature = "std")]
@@ -351,11 +371,11 @@ impl Monitor for SimplePrintingMonitor {
         self.start_time
     }
 
-    fn display(&mut self, event_msg: String, sender_id: u32) {
+    fn display(&mut self, event_msg: String, sender_id: ClientId) {
         println!(
             "[{} #{}] run time: {}, clients: {}, corpus: {}, objectives: {}, executions: {}, exec/sec: {}",
             event_msg,
-            sender_id,
+            sender_id.0,
             format_duration_hms(&(current_time() - self.start_time)),
             self.client_stats().len(),
             self.corpus_size(),
@@ -370,7 +390,7 @@ impl Monitor for SimplePrintingMonitor {
             // Print the client performance monitor.
             println!(
                 "Client {:03}:\n{}",
-                sender_id, self.client_stats[sender_id as usize].introspection_monitor
+                sender_id.0, self.client_stats[sender_id.0 as usize].introspection_monitor
             );
             // Separate the spacing just a bit
             println!();
@@ -421,11 +441,11 @@ where
         self.start_time
     }
 
-    fn display(&mut self, event_msg: String, sender_id: u32) {
+    fn display(&mut self, event_msg: String, sender_id: ClientId) {
         let mut fmt = format!(
             "[{} #{}] run time: {}, clients: {}, corpus: {}, objectives: {}, executions: {}, exec/sec: {}",
             event_msg,
-            sender_id,
+            sender_id.0,
             format_duration_hms(&(current_time() - self.start_time)),
             self.client_stats().len(),
             self.corpus_size(),
@@ -449,7 +469,7 @@ where
             // Print the client performance monitor.
             let fmt = format!(
                 "Client {:03}:\n{}",
-                sender_id, self.client_stats[sender_id as usize].introspection_monitor
+                sender_id.0, self.client_stats[sender_id.0 as usize].introspection_monitor
             );
             (self.print_fn)(fmt);
 
@@ -956,7 +976,10 @@ pub mod pybind {
     use pyo3::{prelude::*, types::PyUnicode};
 
     use super::ClientStats;
-    use crate::monitors::{Monitor, SimpleMonitor};
+    use crate::{
+        bolts::ClientId,
+        monitors::{Monitor, SimpleMonitor},
+    };
 
     // TODO create a PyObjectFnMut to pass, track stabilization of https://github.com/rust-lang/rust/issues/29625
 
@@ -1078,7 +1101,7 @@ pub mod pybind {
             unwrap_me_mut!(self.wrapper, m, { m.start_time() })
         }
 
-        fn display(&mut self, event_msg: String, sender_id: u32) {
+        fn display(&mut self, event_msg: String, sender_id: ClientId) {
             unwrap_me_mut!(self.wrapper, m, { m.display(event_msg, sender_id) });
         }
     }

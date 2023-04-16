@@ -6,6 +6,10 @@
 use alloc::boxed::Box;
 #[cfg(all(unix, feature = "std"))]
 use alloc::vec::Vec;
+#[cfg(all(feature = "std", unix, target_os = "linux"))]
+use core::ptr::addr_of_mut;
+#[cfg(all(unix, feature = "std"))]
+use core::time::Duration;
 use core::{
     borrow::BorrowMut,
     ffi::c_void,
@@ -13,8 +17,6 @@ use core::{
     marker::PhantomData,
     ptr::{self, null_mut},
 };
-#[cfg(all(target_os = "linux", feature = "std"))]
-use core::{ptr::addr_of_mut, time::Duration};
 #[cfg(any(unix, all(windows, feature = "std")))]
 use core::{
     ptr::write_volatile,
@@ -33,7 +35,7 @@ use nix::{
 #[cfg(windows)]
 use windows::Win32::System::Threading::SetThreadStackGuarantee;
 
-#[cfg(unix)]
+#[cfg(all(unix, not(miri)))]
 use crate::bolts::os::unix_signals::setup_signal_handler;
 #[cfg(all(feature = "std", unix))]
 use crate::bolts::os::unix_signals::{ucontext_t, Handler, Signal};
@@ -48,7 +50,7 @@ use crate::{
     fuzzer::HasObjective,
     inputs::UsesInput,
     observers::{ObserversTuple, UsesObservers},
-    state::{HasClientPerfMonitor, HasSolutions, UsesState},
+    state::{HasClientPerfMonitor, HasCorpus, HasSolutions, UsesState},
     Error,
 };
 
@@ -165,7 +167,7 @@ where
     H: FnMut(&<S as UsesInput>::Input) -> ExitKind + ?Sized,
     HB: BorrowMut<H>,
     OT: ObserversTuple<S>,
-    S: HasSolutions + HasClientPerfMonitor,
+    S: HasSolutions + HasClientPerfMonitor + HasCorpus,
 {
     /// Create a new in mem executor.
     /// Caution: crash and restart in one of them will lead to odd behavior if multiple are used,
@@ -342,14 +344,16 @@ impl InProcessHandlers {
         E: Executor<EM, Z> + HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor,
+        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         #[cfg(unix)]
+        #[cfg_attr(miri, allow(unused_variables))]
         unsafe {
             let data = &mut GLOBAL_STATE;
             #[cfg(feature = "std")]
             unix_signal_handler::setup_panic_hook::<E, EM, OF, Z>();
+            #[cfg(not(miri))]
             setup_signal_handler(data)?;
             compiler_fence(Ordering::SeqCst);
             Ok(Self {
@@ -541,7 +545,7 @@ pub fn run_observers_and_save_state<E, EM, OF, Z>(
     E: HasObservers,
     EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
     OF: Feedback<E::State>,
-    E::State: HasSolutions + HasClientPerfMonitor,
+    E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
     Z: HasObjective<Objective = OF, State = E::State>,
 {
     let observers = executor.observers_mut();
@@ -558,9 +562,10 @@ pub fn run_observers_and_save_state<E, EM, OF, Z>(
     if interesting {
         let mut new_testcase = Testcase::new(input.clone());
         new_testcase.add_metadata(exitkind);
+        new_testcase.set_parent_id_optional(*state.corpus().current());
         fuzzer
             .objective_mut()
-            .append_metadata(state, &mut new_testcase)
+            .append_metadata(state, observers, &mut new_testcase)
             .expect("Failed adding metadata");
         state
             .solutions_mut()
@@ -576,6 +581,7 @@ pub fn run_observers_and_save_state<E, EM, OF, Z>(
             .expect("Could not save state in run_observers_and_save_state");
     }
 
+    // We will start mutators from scratch after restart.
     event_mgr.on_restart(state).unwrap();
 
     log::info!("Waiting for broker...");
@@ -606,7 +612,7 @@ mod unix_signal_handler {
         feedbacks::Feedback,
         fuzzer::HasObjective,
         inputs::UsesInput,
-        state::{HasClientPerfMonitor, HasSolutions},
+        state::{HasClientPerfMonitor, HasCorpus, HasSolutions},
     };
 
     pub(crate) type HandlerFuncPtr =
@@ -665,7 +671,7 @@ mod unix_signal_handler {
         E: HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor,
+        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         let old_hook = panic::take_hook();
@@ -706,7 +712,7 @@ mod unix_signal_handler {
         E: HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor,
+        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         if !data.is_valid() {
@@ -749,7 +755,7 @@ mod unix_signal_handler {
         E: Executor<EM, Z> + HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor,
+        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         #[cfg(all(target_os = "android", target_arch = "aarch64"))]
@@ -857,7 +863,7 @@ pub mod windows_asan_handler {
         feedbacks::Feedback,
         fuzzer::HasObjective,
         inputs::UsesInput,
-        state::{HasClientPerfMonitor, HasSolutions},
+        state::{HasClientPerfMonitor, HasCorpus, HasSolutions},
     };
 
     /// # Safety
@@ -867,7 +873,7 @@ pub mod windows_asan_handler {
         E: Executor<EM, Z> + HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor,
+        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         let mut data = &mut GLOBAL_STATE;
@@ -966,7 +972,7 @@ mod windows_exception_handler {
         feedbacks::Feedback,
         fuzzer::HasObjective,
         inputs::UsesInput,
-        state::{HasClientPerfMonitor, HasSolutions},
+        state::{HasClientPerfMonitor, HasCorpus, HasSolutions},
     };
 
     pub(crate) type HandlerFuncPtr =
@@ -1005,7 +1011,7 @@ mod windows_exception_handler {
         E: HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor,
+        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         let old_hook = panic::take_hook();
@@ -1064,7 +1070,7 @@ mod windows_exception_handler {
         E: HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor,
+        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         let data: &mut InProcessExecutorHandlerData =
@@ -1125,7 +1131,7 @@ mod windows_exception_handler {
         E: Executor<EM, Z> + HasObservers,
         EM: EventFirer<State = E::State> + EventRestarter<State = E::State>,
         OF: Feedback<E::State>,
-        E::State: HasSolutions + HasClientPerfMonitor,
+        E::State: HasSolutions + HasClientPerfMonitor + HasCorpus,
         Z: HasObjective<Objective = OF, State = E::State>,
     {
         // Have we set a timer_before?
@@ -1278,9 +1284,11 @@ impl InChildProcessHandlers {
     where
         E: HasObservers,
     {
+        #[cfg_attr(miri, allow(unused_variables))]
         unsafe {
             let data = &mut FORK_EXECUTOR_GLOBAL_DATA;
             // child_signal_handlers::setup_child_panic_hook::<E, I, OT, S>();
+            #[cfg(not(miri))]
             setup_signal_handler(data)?;
             compiler_fence(Ordering::SeqCst);
             Ok(Self {
@@ -1295,9 +1303,11 @@ impl InChildProcessHandlers {
     where
         E: HasObservers,
     {
+        #[cfg_attr(miri, allow(unused_variables))]
         unsafe {
             let data = &mut FORK_EXECUTOR_GLOBAL_DATA;
             // child_signal_handlers::setup_child_panic_hook::<E, I, OT, S>();
+            #[cfg(not(miri))]
             setup_signal_handler(data)?;
             compiler_fence(Ordering::SeqCst);
             Ok(Self {
@@ -1410,6 +1420,47 @@ impl Handler for InProcessForkExecutorGlobalData {
     }
 }
 
+#[repr(C)]
+#[cfg(all(feature = "std", unix, not(target_os = "linux")))]
+struct Timeval {
+    pub tv_sec: i64,
+    pub tv_usec: i64,
+}
+
+#[cfg(all(feature = "std", unix, not(target_os = "linux")))]
+impl Debug for Timeval {
+    #[allow(clippy::cast_sign_loss)]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Timeval {{ tv_sec: {:?}, tv_usec: {:?} (tv: {:?}) }}",
+            self.tv_sec,
+            self.tv_usec,
+            Duration::new(self.tv_sec as _, (self.tv_usec * 1000) as _)
+        )
+    }
+}
+
+#[repr(C)]
+#[cfg(all(feature = "std", unix, not(target_os = "linux")))]
+#[derive(Debug)]
+struct Itimerval {
+    pub it_interval: Timeval,
+    pub it_value: Timeval,
+}
+
+#[cfg(all(feature = "std", unix, not(target_os = "linux")))]
+extern "C" {
+    fn setitimer(
+        which: libc::c_int,
+        new_value: *mut Itimerval,
+        old_value: *mut Itimerval,
+    ) -> libc::c_int;
+}
+
+#[cfg(all(feature = "std", unix, not(target_os = "linux")))]
+const ITIMER_REAL: libc::c_int = 0;
+
 /// [`InProcessForkExecutor`] is an executor that forks the current process before each execution.
 #[cfg(all(feature = "std", unix))]
 pub struct InProcessForkExecutor<'a, H, OT, S, SP>
@@ -1427,7 +1478,7 @@ where
 }
 
 /// Timeout executor for [`InProcessForkExecutor`]
-#[cfg(all(feature = "std", target_os = "linux"))]
+#[cfg(all(feature = "std", unix))]
 pub struct TimeoutInProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
@@ -1439,7 +1490,10 @@ where
     shmem_provider: SP,
     observers: OT,
     handlers: InChildProcessHandlers,
+    #[cfg(target_os = "linux")]
     itimerspec: libc::itimerspec,
+    #[cfg(all(unix, not(target_os = "linux")))]
+    itimerval: Itimerval,
     phantom: PhantomData<S>,
 }
 
@@ -1459,7 +1513,7 @@ where
     }
 }
 
-#[cfg(all(feature = "std", target_os = "linux"))]
+#[cfg(all(feature = "std", unix))]
 impl<'a, H, OT, S, SP> Debug for TimeoutInProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
@@ -1467,12 +1521,24 @@ where
     S: UsesInput,
     SP: ShMemProvider,
 {
+    #[cfg(target_os = "linux")]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("TimeoutInProcessForkExecutor")
             .field("observers", &self.observers)
             .field("shmem_provider", &self.shmem_provider)
             .field("itimerspec", &self.itimerspec)
             .finish()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        #[cfg(not(target_os = "linux"))]
+        return f
+            .debug_struct("TimeoutInProcessForkExecutor")
+            .field("observers", &self.observers)
+            .field("shmem_provider", &self.shmem_provider)
+            .field("itimerval", &self.itimerval)
+            .finish();
     }
 }
 
@@ -1487,7 +1553,7 @@ where
     type State = S;
 }
 
-#[cfg(all(feature = "std", target_os = "linux"))]
+#[cfg(all(feature = "std", unix))]
 impl<'a, H, OT, S, SP> UsesState for TimeoutInProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: ?Sized + FnMut(&S::Input) -> ExitKind,
@@ -1536,7 +1602,7 @@ where
                         .post_exec_child_all(state, input, &ExitKind::Ok)
                         .expect("Failed to run post_exec on observers");
 
-                    std::process::exit(0);
+                    libc::_exit(0);
 
                     Ok(ExitKind::Ok)
                 }
@@ -1566,7 +1632,7 @@ where
     }
 }
 
-#[cfg(all(feature = "std", target_os = "linux"))]
+#[cfg(all(feature = "std", unix))]
 impl<'a, EM, H, OT, S, SP, Z> Executor<EM, Z> for TimeoutInProcessForkExecutor<'a, H, OT, S, SP>
 where
     EM: UsesState<State = S>,
@@ -1598,22 +1664,37 @@ where
                         .pre_exec_child_all(state, input)
                         .expect("Failed to run post_exec on observers");
 
-                    let mut timerid: libc::timer_t = null_mut();
-                    // creates a new per-process interval timer
-                    // we can't do this from the parent, timerid is unique to each process.
-                    libc::timer_create(libc::CLOCK_MONOTONIC, null_mut(), addr_of_mut!(timerid));
+                    #[cfg(target_os = "linux")]
+                    {
+                        let mut timerid: libc::timer_t = null_mut();
+                        // creates a new per-process interval timer
+                        // we can't do this from the parent, timerid is unique to each process.
+                        libc::timer_create(
+                            libc::CLOCK_MONOTONIC,
+                            null_mut(),
+                            addr_of_mut!(timerid),
+                        );
 
-                    log::info!("Set timer! {:#?} {timerid:#?}", self.itimerspec);
-                    let v =
-                        libc::timer_settime(timerid, 0, addr_of_mut!(self.itimerspec), null_mut());
-                    log::trace!("{v:#?} {}", nix::errno::errno());
+                        // log::info!("Set timer! {:#?} {timerid:#?}", self.itimerspec);
+                        let _: i32 = libc::timer_settime(
+                            timerid,
+                            0,
+                            addr_of_mut!(self.itimerspec),
+                            null_mut(),
+                        );
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        setitimer(ITIMER_REAL, &mut self.itimerval, null_mut());
+                    }
+                    // log::trace!("{v:#?} {}", nix::errno::errno());
                     (self.harness_fn)(input);
 
                     self.observers
                         .post_exec_child_all(state, input, &ExitKind::Ok)
                         .expect("Failed to run post_exec on observers");
 
-                    std::process::exit(0);
+                    libc::_exit(0);
 
                     Ok(ExitKind::Ok)
                 }
@@ -1700,7 +1781,7 @@ where
     }
 }
 
-#[cfg(all(feature = "std", target_os = "linux"))]
+#[cfg(all(feature = "std", unix))]
 impl<'a, H, OT, S, SP> TimeoutInProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
@@ -1709,6 +1790,7 @@ where
     SP: ShMemProvider,
 {
     /// Creates a new [`TimeoutInProcessForkExecutor`]
+    #[cfg(target_os = "linux")]
     pub fn new<EM, OF, Z>(
         harness_fn: &'a mut H,
         observers: OT,
@@ -1749,6 +1831,48 @@ where
         })
     }
 
+    /// Creates a new [`TimeoutInProcessForkExecutor`], non linux
+    #[cfg(not(target_os = "linux"))]
+    pub fn new<EM, OF, Z>(
+        harness_fn: &'a mut H,
+        observers: OT,
+        _fuzzer: &mut Z,
+        _state: &mut S,
+        _event_mgr: &mut EM,
+        timeout: Duration,
+        shmem_provider: SP,
+    ) -> Result<Self, Error>
+    where
+        EM: EventFirer<State = S> + EventRestarter<State = S>,
+        OF: Feedback<S>,
+        S: HasSolutions + HasClientPerfMonitor,
+        Z: HasObjective<Objective = OF, State = S>,
+    {
+        let handlers = InChildProcessHandlers::with_timeout::<Self>()?;
+        let milli_sec = timeout.as_millis();
+        let it_value = Timeval {
+            tv_sec: (milli_sec / 1000) as i64,
+            tv_usec: (milli_sec % 1000) as i64,
+        };
+        let it_interval = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        let itimerval = Itimerval {
+            it_interval,
+            it_value,
+        };
+
+        Ok(Self {
+            harness_fn,
+            shmem_provider,
+            observers,
+            handlers,
+            itimerval,
+            phantom: PhantomData,
+        })
+    }
+
     /// Retrieve the harness function.
     #[inline]
     pub fn harness(&self) -> &H {
@@ -1773,7 +1897,7 @@ where
     type Observers = OT;
 }
 
-#[cfg(all(feature = "std", target_os = "linux"))]
+#[cfg(all(feature = "std", unix))]
 impl<'a, H, OT, S, SP> UsesObservers for TimeoutInProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: ?Sized + FnMut(&S::Input) -> ExitKind,
@@ -1803,7 +1927,7 @@ where
     }
 }
 
-#[cfg(all(feature = "std", target_os = "linux"))]
+#[cfg(all(feature = "std", unix))]
 impl<'a, H, OT, S, SP> HasObservers for TimeoutInProcessForkExecutor<'a, H, OT, S, SP>
 where
     H: FnMut(&S::Input) -> ExitKind + ?Sized,
@@ -1955,6 +2079,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg_attr(miri, ignore)]
     #[cfg(all(feature = "std", feature = "fork", unix))]
     fn test_inprocessfork_exec() {
         use crate::{

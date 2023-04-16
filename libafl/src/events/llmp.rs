@@ -7,7 +7,7 @@ use alloc::{
 };
 #[cfg(feature = "std")]
 use core::sync::atomic::{compiler_fence, Ordering};
-use core::{marker::PhantomData, time::Duration};
+use core::{marker::PhantomData, num::NonZeroUsize, time::Duration};
 #[cfg(feature = "std")]
 use std::net::{SocketAddr, ToSocketAddrs};
 
@@ -22,6 +22,8 @@ use super::{CustomBufEventResult, CustomBufHandlerFn};
 use crate::bolts::core_affinity::CoreId;
 #[cfg(all(feature = "std", any(windows, not(feature = "fork"))))]
 use crate::bolts::os::startable_self;
+#[cfg(all(unix, feature = "std", not(miri)))]
+use crate::bolts::os::unix_signals::setup_signal_handler;
 #[cfg(all(feature = "std", feature = "fork", unix))]
 use crate::bolts::os::{fork, ForkResult};
 #[cfg(feature = "llmp_compression")]
@@ -32,14 +34,12 @@ use crate::bolts::{
 #[cfg(feature = "std")]
 use crate::bolts::{llmp::LlmpConnection, shmem::StdShMemProvider, staterestore::StateRestorer};
 #[cfg(all(unix, feature = "std"))]
-use crate::{
-    bolts::os::unix_signals::setup_signal_handler,
-    events::{shutdown_handler, SHUTDOWN_SIGHANDLER_DATA},
-};
+use crate::events::{shutdown_handler, SHUTDOWN_SIGHANDLER_DATA};
 use crate::{
     bolts::{
         llmp::{self, LlmpClient, LlmpClientDescription, Tag},
         shmem::ShMemProvider,
+        ClientId,
     },
     events::{
         BrokerEventResult, Event, EventConfig, EventFirer, EventManager, EventManagerId,
@@ -54,14 +54,14 @@ use crate::{
 };
 
 /// Forward this to the client
-const _LLMP_TAG_EVENT_TO_CLIENT: Tag = 0x2C11E471;
+const _LLMP_TAG_EVENT_TO_CLIENT: Tag = Tag(0x2C11E471);
 /// Only handle this in the broker
-const _LLMP_TAG_EVENT_TO_BROKER: Tag = 0x2B80438;
+const _LLMP_TAG_EVENT_TO_BROKER: Tag = Tag(0x2B80438);
 /// Handle in both
 ///
-const LLMP_TAG_EVENT_TO_BOTH: Tag = 0x2B0741;
-const _LLMP_TAG_RESTART: Tag = 0x8357A87;
-const _LLMP_TAG_NO_RESTART: Tag = 0x57A7EE71;
+const LLMP_TAG_EVENT_TO_BOTH: Tag = Tag(0x2B0741);
+const _LLMP_TAG_RESTART: Tag = Tag(0x8357A87);
+const _LLMP_TAG_NO_RESTART: Tag = Tag(0x57A7EE71);
 
 /// The minimum buffer size at which to compress LLMP IPC messages.
 #[cfg(feature = "llmp_compression")]
@@ -89,7 +89,7 @@ where
     SP: ShMemProvider + 'static,
     MT: Monitor,
 {
-    /// Create an even broker from a raw broker.
+    /// Create an event broker from a raw broker.
     pub fn new(llmp: llmp::LlmpBroker<SP>, monitor: MT) -> Result<Self, Error> {
         Ok(Self {
             monitor,
@@ -100,10 +100,11 @@ where
         })
     }
 
-    /// Create llmp on a port
+    /// Create an LLMP broker on a port.
+    ///
     /// The port must not be bound yet to have a broker.
     #[cfg(feature = "std")]
-    pub fn new_on_port(shmem_provider: SP, monitor: MT, port: u16) -> Result<Self, Error> {
+    pub fn on_port(shmem_provider: SP, monitor: MT, port: u16) -> Result<Self, Error> {
         Ok(Self {
             monitor,
             llmp: llmp::LlmpBroker::create_attach_to_tcp(shmem_provider, port)?,
@@ -113,7 +114,12 @@ where
         })
     }
 
-    /// Connect to an llmp broker on the givien address
+    /// Exit the broker process cleanly after at least `n` clients attached and all of them disconnected again
+    pub fn set_exit_cleanly_after(&mut self, n_clients: NonZeroUsize) {
+        self.llmp.set_exit_cleanly_after(n_clients);
+    }
+
+    /// Connect to an LLMP broker on the given address
     #[cfg(feature = "std")]
     pub fn connect_b2b<A>(&mut self, addr: A) -> Result<(), Error>
     where
@@ -154,10 +160,13 @@ where
             Some(Duration::from_millis(5)),
         );
 
-        Ok(())
+        #[cfg(all(feature = "std", feature = "llmp_debug"))]
+        println!("The last client quit. Exiting.");
+
+        Err(Error::shutting_down())
     }
 
-    /// Run forever in the broker
+    /// Run in the broker until all clients exit
     #[cfg(feature = "llmp_broker_timeouts")]
     pub fn broker_loop(&mut self) -> Result<(), Error> {
         let monitor = &mut self.monitor;
@@ -189,7 +198,7 @@ where
                         Ok(llmp::LlmpMsgHookResult::ForwardToClients)
                     }
                 } else {
-                    monitor.display("Broker".into(), 0);
+                    monitor.display("Broker".into(), ClientId(0));
                     Ok(llmp::LlmpMsgHookResult::Handled)
                 }
             },
@@ -197,14 +206,17 @@ where
             Some(Duration::from_millis(5)),
         );
 
-        Ok(())
+        #[cfg(feature = "llmp_debug")]
+        println!("The last client quit. Exiting.");
+
+        Err(Error::shutting_down())
     }
 
     /// Handle arriving events in the broker
     #[allow(clippy::unnecessary_wraps)]
     fn handle_in_broker(
         monitor: &mut MT,
-        client_id: u32,
+        client_id: ClientId,
         event: &Event<I>,
     ) -> Result<BrokerEventResult, Error> {
         match &event {
@@ -297,11 +309,15 @@ where
     S: UsesInput,
     SP: ShMemProvider + 'static,
 {
+    /// The LLMP client for inter process communication
     llmp: LlmpClient<SP>,
     /// The custom buf handler
     custom_buf_handlers: Vec<Box<CustomBufHandlerFn<S>>>,
     #[cfg(feature = "llmp_compression")]
     compressor: GzipCompressor,
+    /// The configuration defines this specific fuzzer.
+    /// A node will not re-use the observer values sent over LLMP
+    /// from nodes with other configurations.
     configuration: EventConfig,
     phantom: PhantomData<S>,
 }
@@ -340,7 +356,7 @@ where
     S: UsesInput + HasExecutions + HasClientPerfMonitor,
     SP: ShMemProvider + 'static,
 {
-    /// Create a manager from a raw llmp client
+    /// Create a manager from a raw LLMP client
     pub fn new(llmp: LlmpClient<SP>, configuration: EventConfig) -> Result<Self, Error> {
         Ok(Self {
             llmp,
@@ -352,11 +368,12 @@ where
         })
     }
 
-    /// Create llmp on a port
-    /// If the port is not yet bound, it will act as broker
-    /// Else, it will act as client.
+    /// Create an LLMP event manager on a port
+    ///
+    /// If the port is not yet bound, it will act as a broker; otherwise, it
+    /// will act as a client.
     #[cfg(feature = "std")]
-    pub fn new_on_port(
+    pub fn on_port(
         shmem_provider: SP,
         port: u16,
         configuration: EventConfig,
@@ -371,7 +388,8 @@ where
         })
     }
 
-    /// If a client respawns, it may reuse the existing connection, previously stored by [`LlmpClient::to_env()`].
+    /// If a client respawns, it may reuse the existing connection, previously
+    /// stored by [`LlmpClient::to_env()`].
     #[cfg(feature = "std")]
     pub fn existing_client_from_env(
         shmem_provider: SP,
@@ -388,7 +406,7 @@ where
         })
     }
 
-    /// Describe the client event mgr's llmp parts in a restorable fashion
+    /// Describe the client event manager's LLMP parts in a restorable fashion
     pub fn describe(&self) -> Result<LlmpClientDescription, Error> {
         self.llmp.describe()
     }
@@ -409,7 +427,8 @@ where
         })
     }
 
-    /// Write the config for a client [`EventManager`] to env vars, a new client can reattach using [`LlmpEventManager::existing_client_from_env()`].
+    /// Write the config for a client [`EventManager`] to env vars, a new
+    /// client can reattach using [`LlmpEventManager::existing_client_from_env()`].
     #[cfg(feature = "std")]
     pub fn to_env(&self, env_name: &str) {
         self.llmp.to_env(env_name).unwrap();
@@ -422,7 +441,7 @@ where
         fuzzer: &mut Z,
         executor: &mut E,
         state: &mut S,
-        _client_id: u32,
+        client_id: ClientId,
         event: Event<S::Input>,
     ) -> Result<(), Error>
     where
@@ -440,7 +459,7 @@ where
                 time: _,
                 executions: _,
             } => {
-                log::info!("Received new Testcase from {_client_id} ({client_config:?})");
+                log::info!("Received new Testcase from {client_id:?} ({client_config:?})");
 
                 let _res = if client_config.match_with(&self.configuration)
                     && observers_buf.is_some()
@@ -471,6 +490,15 @@ where
                 event.name()
             ))),
         }
+    }
+}
+
+impl<S: UsesInput, SP: ShMemProvider> LlmpEventManager<S, SP> {
+    /// Send information that this client is exiting.
+    /// The other side may free up all allocated memory.
+    /// We are no longer allowed to send anything afterwards.
+    pub fn send_exiting(&mut self) -> Result<(), Error> {
+        self.llmp.sender.send_exiting()
     }
 }
 
@@ -532,8 +560,8 @@ where
     S: UsesInput,
     SP: ShMemProvider,
 {
-    /// The llmp client needs to wait until a broker mapped all pages, before shutting down.
-    /// Otherwise, the OS may already have removed the shared maps,
+    /// The LLMP client needs to wait until a broker has mapped all pages before shutting down.
+    /// Otherwise, the OS may already have removed the shared maps.
     fn await_restart_safe(&mut self) {
         // wait until we can drop the message safely.
         self.llmp.await_safe_to_unmap_blocking();
@@ -622,9 +650,7 @@ where
 {
     /// Gets the id assigned to this staterestorer.
     fn mgr_id(&self) -> EventManagerId {
-        EventManagerId {
-            id: self.llmp.sender.id as usize,
-        }
+        EventManagerId(self.llmp.sender.id.0 as usize)
     }
 }
 
@@ -637,10 +663,12 @@ where
     SP: ShMemProvider + 'static,
     //CE: CustomEvent<I>,
 {
-    /// The embedded llmp event manager
+    /// The embedded LLMP event manager
     llmp_mgr: LlmpEventManager<S, SP>,
     /// The staterestorer to serialize the state for the next runner
     staterestorer: StateRestorer<SP>,
+    /// Decide if the state restorer must save the serialized state
+    save_state: bool,
 }
 
 #[cfg(feature = "std")]
@@ -699,8 +727,17 @@ where
     fn on_restart(&mut self, state: &mut S) -> Result<(), Error> {
         // First, reset the page to 0 so the next iteration can read read from the beginning of this page
         self.staterestorer.reset();
-        self.staterestorer
-            .save(&(state, &self.llmp_mgr.describe()?))
+        self.staterestorer.save(&(
+            if self.save_state { Some(state) } else { None },
+            &self.llmp_mgr.describe()?,
+        ))
+    }
+
+    fn send_exiting(&mut self) -> Result<(), Error> {
+        self.staterestorer.send_exiting();
+        // Also inform the broker that we are about to exit.
+        // This way, the broker can clean up the pages, and eventually exit.
+        self.llmp_mgr.send_exiting()
     }
 }
 
@@ -758,6 +795,20 @@ where
         Self {
             llmp_mgr,
             staterestorer,
+            save_state: true,
+        }
+    }
+
+    /// Create a new runner specifying if it must save the serialized state on restart.
+    pub fn with_save_state(
+        llmp_mgr: LlmpEventManager<S, SP>,
+        staterestorer: StateRestorer<SP>,
+        save_state: bool,
+    ) -> Self {
+        Self {
+            llmp_mgr,
+            staterestorer,
+            save_state,
         }
     }
 
@@ -780,7 +831,7 @@ pub enum ManagerKind {
     Any,
     /// A client, getting messages from a local broker.
     Client {
-        /// The cpu core id of this client
+        /// The CPU core ID of this client
         cpu_core: Option<CoreId>,
     },
     /// A [`llmp::LlmpBroker`], forwarding the packets of local clients.
@@ -840,6 +891,17 @@ where
     /// The type of manager to build
     #[builder(default = ManagerKind::Any)]
     kind: ManagerKind,
+    /// The amount of external clients that should have connected (not counting our own tcp client)
+    /// before this broker quits _after the last client exited_.
+    /// If `None`, the broker will never quit when the last client exits, but run forever.
+    ///
+    /// So, if this value is `Some(2)`, the broker will not exit after client 1 connected and disconnected,
+    /// but it will quit after client 2 connected and disconnected.
+    #[builder(default = None)]
+    exit_cleanly_after: Option<NonZeroUsize>,
+    /// Tell the manager to serialize or not the state on restart
+    #[builder(default = true)]
+    serialize_state: bool,
     #[builder(setter(skip), default = PhantomData)]
     phantom_data: PhantomData<S>,
 }
@@ -864,6 +926,10 @@ where
                     log::info!("B2b: Connecting to {:?}", &remote_broker_addr);
                     broker.connect_b2b(remote_broker_addr)?;
                 };
+
+                if let Some(exit_cleanly_after) = self.exit_cleanly_after {
+                    broker.set_exit_cleanly_after(exit_cleanly_after);
+                }
 
                 broker.broker_loop()
             };
@@ -896,19 +962,18 @@ where
                     }
                 }
                 ManagerKind::Broker => {
-                    let event_broker = LlmpEventBroker::<S::Input, MT, SP>::new_on_port(
+                    let event_broker = LlmpEventBroker::<S::Input, MT, SP>::on_port(
                         self.shmem_provider.clone(),
                         self.monitor.take().unwrap(),
                         self.broker_port,
                     )?;
 
                     broker_things(event_broker, self.remote_broker_addr)?;
-
-                    return Err(Error::shutting_down());
+                    unreachable!("The broker may never return normally, only on errors or when shutting down.");
                 }
                 ManagerKind::Client { cpu_core } => {
                     // We are a client
-                    let mgr = LlmpEventManager::<S, SP>::new_on_port(
+                    let mgr = LlmpEventManager::<S, SP>::on_port(
                         self.shmem_provider.clone(),
                         self.broker_port,
                         self.configuration,
@@ -951,7 +1016,7 @@ where
             }
 
             // We setup signal handlers to clean up shmem segments used by state restorer
-            #[cfg(unix)]
+            #[cfg(all(unix, not(miri)))]
             if let Err(_e) = unsafe { setup_signal_handler(&mut SHUTDOWN_SIGHANDLER_DATA) } {
                 // We can live without a proper ctrl+c signal handler. Print and ignore.
                 log::error!("Failed to setup signal handlers: {_e}");
@@ -978,7 +1043,7 @@ where
                     }
                 };
 
-                // On windows (or in any case without fork), we spawn ourself again
+                // On Windows (or in any case without fork), we spawn ourself again
                 #[cfg(any(windows, not(feature = "fork")))]
                 let child_status = startable_self()?.status()?;
                 #[cfg(all(unix, not(feature = "fork")))]
@@ -987,7 +1052,7 @@ where
                 compiler_fence(Ordering::SeqCst);
 
                 #[allow(clippy::manual_assert)]
-                if !staterestorer.has_content() {
+                if !staterestorer.has_content() && self.serialize_state {
                     #[cfg(unix)]
                     if child_status == 137 {
                         // Out of Memory, see https://tldp.org/LDP/abs/html/exitcodes.html
@@ -997,6 +1062,10 @@ where
 
                     // Storing state in the last round did not work
                     panic!("Fuzzer-respawner: Storing state in crashed fuzzer instance did not work, no point to spawn the next client! This can happen if the child calls `exit()`, in that case make sure it uses `abort()`, if it got killed unrecoverable (OOM), or if there is a bug in the fuzzer itself. (Child exited with: {child_status})");
+                }
+
+                if staterestorer.wants_to_exit() {
+                    return Err(Error::shutting_down());
                 }
 
                 ctr = ctr.wrapping_add(1);
@@ -1018,29 +1087,38 @@ where
         }
 
         // If we're restarting, deserialize the old state.
-        let (state, mut mgr) = if let Some((state, mgr_description)) = staterestorer.restore()? {
-            (
-                Some(state),
-                LlmpRestartingEventManager::new(
-                    LlmpEventManager::existing_client_from_description(
-                        new_shmem_provider,
-                        &mgr_description,
-                        self.configuration,
-                    )?,
-                    staterestorer,
-                ),
-            )
-        } else {
-            log::info!("First run. Let's set it all up");
-            // Mgr to send and receive msgs from/to all other fuzzer instances
-            let mgr = LlmpEventManager::<S, SP>::existing_client_from_env(
-                new_shmem_provider,
-                _ENV_FUZZER_BROKER_CLIENT_INITIAL,
-                self.configuration,
-            )?;
+        let (state, mut mgr) =
+            if let Some((state_opt, mgr_description)) = staterestorer.restore()? {
+                (
+                    state_opt,
+                    LlmpRestartingEventManager::with_save_state(
+                        LlmpEventManager::existing_client_from_description(
+                            new_shmem_provider,
+                            &mgr_description,
+                            self.configuration,
+                        )?,
+                        staterestorer,
+                        self.serialize_state,
+                    ),
+                )
+            } else {
+                log::info!("First run. Let's set it all up");
+                // Mgr to send and receive msgs from/to all other fuzzer instances
+                let mgr = LlmpEventManager::<S, SP>::existing_client_from_env(
+                    new_shmem_provider,
+                    _ENV_FUZZER_BROKER_CLIENT_INITIAL,
+                    self.configuration,
+                )?;
 
-            (None, LlmpRestartingEventManager::new(mgr, staterestorer))
-        };
+                (
+                    None,
+                    LlmpRestartingEventManager::with_save_state(
+                        mgr,
+                        staterestorer,
+                        self.serialize_state,
+                    ),
+                )
+            };
         // We reset the staterestorer, the next staterestorer and receiver (after crash) will reuse the page from the initial message.
         mgr.staterestorer.reset();
 
@@ -1122,7 +1200,7 @@ where
 
     /// Create a client from port and the input converters
     #[cfg(feature = "std")]
-    pub fn new_on_port(
+    pub fn on_port(
         shmem_provider: SP,
         port: u16,
         converter: Option<IC>,
@@ -1188,7 +1266,7 @@ where
         executor: &mut E,
         state: &mut S,
         manager: &mut EM,
-        _client_id: u32,
+        _client_id: ClientId,
         event: Event<DI>,
     ) -> Result<(), Error>
     where
@@ -1207,7 +1285,7 @@ where
                 time: _,
                 executions: _,
             } => {
-                log::info!("Received new Testcase to convert from {_client_id}");
+                log::info!("Received new Testcase to convert from {_client_id:?}");
 
                 let Some(converter) = self.converter_back.as_mut() else {
                     return Ok(());
@@ -1412,6 +1490,7 @@ mod tests {
             shmem::{ShMemProvider, StdShMemProvider},
             staterestore::StateRestorer,
             tuples::tuple_list,
+            ClientId,
         },
         corpus::{Corpus, InMemoryCorpus, Testcase},
         events::{llmp::_ENV_FUZZER_SENDER, LlmpEventManager},
@@ -1428,6 +1507,7 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg_attr(miri, ignore)]
     fn test_mgr_state_restore() {
         let rand = StdRand::with_seed(0);
 
@@ -1447,8 +1527,8 @@ mod tests {
 
         let mut llmp_client = LlmpClient::new(
             shmem_provider.clone(),
-            LlmpSharedMap::new(0, shmem_provider.new_shmem(1024).unwrap()),
-            0,
+            LlmpSharedMap::new(ClientId(0), shmem_provider.new_shmem(1024).unwrap()),
+            ClientId(0),
         )
         .unwrap();
 

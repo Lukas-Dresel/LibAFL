@@ -1,10 +1,15 @@
 //! Corpuses contain the testcases, either in memory, on disk, or somewhere else.
 
 pub mod testcase;
-pub use testcase::{SchedulerTestcaseMetaData, Testcase};
+pub use testcase::{HasTestcase, SchedulerTestcaseMetadata, Testcase};
 
 pub mod inmemory;
 pub use inmemory::InMemoryCorpus;
+
+#[cfg(feature = "std")]
+pub mod inmemory_ondisk;
+#[cfg(feature = "std")]
+pub use inmemory_ondisk::InMemoryOnDiskCorpus;
 
 #[cfg(feature = "std")]
 pub mod ondisk;
@@ -46,6 +51,13 @@ impl From<usize> for CorpusId {
 impl From<u64> for CorpusId {
     fn from(id: u64) -> Self {
         Self(id as usize)
+    }
+}
+
+impl From<CorpusId> for usize {
+    /// Not that the `CorpusId` is not necessarily stable in the corpus (if we remove [`Testcase`]s, for example).
+    fn from(id: CorpusId) -> Self {
+        id.0
     }
 }
 
@@ -173,8 +185,9 @@ pub mod pybind {
     use crate::{
         corpus::{
             cached::pybind::PythonCachedOnDiskCorpus, inmemory::pybind::PythonInMemoryCorpus,
+            inmemory_ondisk::pybind::PythonInMemoryOnDiskCorpus,
             ondisk::pybind::PythonOnDiskCorpus, testcase::pybind::PythonTestcaseWrapper, Corpus,
-            CorpusId, Testcase,
+            CorpusId, HasTestcase, Testcase,
         },
         inputs::{BytesInput, UsesInput},
         Error,
@@ -185,6 +198,7 @@ pub mod pybind {
         InMemory(Py<PythonInMemoryCorpus>),
         CachedOnDisk(Py<PythonCachedOnDiskCorpus>),
         OnDisk(Py<PythonOnDiskCorpus>),
+        InMemoryOnDisk(Py<PythonInMemoryOnDiskCorpus>),
     }
 
     /// Corpus Trait binding
@@ -204,6 +218,7 @@ pub mod pybind {
                 PythonCorpusWrapper,
                 {
                     InMemory,
+                    InMemoryOnDisk,
                     CachedOnDisk,
                     OnDisk
                 }
@@ -220,6 +235,7 @@ pub mod pybind {
                 PythonCorpusWrapper,
                 {
                     InMemory,
+                    InMemoryOnDisk,
                     CachedOnDisk,
                     OnDisk
                 }
@@ -250,6 +266,16 @@ pub mod pybind {
         pub fn new_on_disk(py_on_disk_corpus: Py<PythonOnDiskCorpus>) -> Self {
             Self {
                 wrapper: PythonCorpusWrapper::OnDisk(py_on_disk_corpus),
+            }
+        }
+
+        #[staticmethod]
+        #[must_use]
+        pub fn new_in_memory_on_disk(
+            py_in_memory_on_disk_corpus: Py<PythonInMemoryOnDiskCorpus>,
+        ) -> Self {
+            Self {
+                wrapper: PythonCorpusWrapper::InMemoryOnDisk(py_in_memory_on_disk_corpus),
             }
         }
 
@@ -356,6 +382,22 @@ pub mod pybind {
                 .nth(nth)
                 .expect("Failed to get a random CorpusId")
         }*/
+    }
+
+    impl HasTestcase for PythonCorpus {
+        fn testcase(
+            &self,
+            id: CorpusId,
+        ) -> Result<core::cell::Ref<Testcase<<Self as UsesInput>::Input>>, Error> {
+            Ok(self.get(id)?.borrow())
+        }
+
+        fn testcase_mut(
+            &self,
+            id: CorpusId,
+        ) -> Result<core::cell::RefMut<Testcase<<Self as UsesInput>::Input>>, Error> {
+            Ok(self.get(id)?.borrow_mut())
+        }
     }
 
     /// Register the classes to the python module
