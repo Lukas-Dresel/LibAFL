@@ -216,7 +216,7 @@ where
         if testcase.filename().is_none() {
             // TODO walk entry metadata to ask for pieces of filename (e.g. :havoc in AFL)
             let file_orig = testcase.input().as_ref().unwrap().generate_name(idx.0);
-            let file_orig = format!("id:{}:{}", <CorpusId as Into<usize>>::into(idx), file_orig);
+            let file_orig = format!("id:{:06}:{}", <CorpusId as Into<usize>>::into(idx), file_orig);
             let mut file = file_orig.clone();
 
             let mut ctr = 2;
