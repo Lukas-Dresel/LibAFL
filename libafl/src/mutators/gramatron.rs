@@ -4,10 +4,10 @@ use alloc::vec::Vec;
 use core::cmp::max;
 
 use hashbrown::HashMap;
+use libafl_bolts::{rands::Rand, Named};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bolts::{rands::Rand, tuples::Named},
     corpus::{Corpus, HasTestcase},
     generators::GramatronGenerator,
     inputs::{GramatronInput, Terminal},
@@ -72,12 +72,16 @@ where
 
 /// The metadata used for `gramatron`
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 pub struct GramatronIdxMapMetadata {
     /// The map containing a vec for each terminal
     pub map: HashMap<usize, Vec<usize>>,
 }
 
-crate::impl_serdeany!(GramatronIdxMapMetadata);
+libafl_bolts::impl_serdeany!(GramatronIdxMapMetadata);
 
 impl GramatronIdxMapMetadata {
     /// Creates a new [`struct@GramatronIdxMapMetadata`].
@@ -117,11 +121,10 @@ where
 
         let rand_num = state.rand_mut().next() as usize;
 
-        let mut other_testcase = state.testcase_mut(idx)?;
-        other_testcase.load_input()?; // Preload the input
+        let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
 
         if !other_testcase.has_metadata::<GramatronIdxMapMetadata>() {
-            let meta = GramatronIdxMapMetadata::new(other_testcase.input().as_ref().unwrap());
+            let meta = GramatronIdxMapMetadata::new(other_testcase.load_input(state.corpus())?);
             other_testcase.add_metadata(meta);
         }
         let meta = other_testcase

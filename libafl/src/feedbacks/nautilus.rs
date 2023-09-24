@@ -4,19 +4,19 @@ use core::{fmt::Debug, marker::PhantomData};
 use std::fs::create_dir_all;
 
 use grammartec::{chunkstore::ChunkStore, context::Context};
+use libafl_bolts::Named;
 use serde::{Deserialize, Serialize};
 use serde_json;
 
 use crate::{
-    bolts::tuples::Named,
-    corpus::Testcase,
+    corpus::{Corpus, Testcase},
     events::EventFirer,
     executors::ExitKind,
     feedbacks::Feedback,
     generators::NautilusContext,
     inputs::{NautilusInput, UsesInput},
     observers::ObserversTuple,
-    state::{HasClientPerfMonitor, HasMetadata},
+    state::{HasClientPerfMonitor, HasCorpus, HasMetadata},
     Error,
 };
 
@@ -37,7 +37,7 @@ impl Debug for NautilusChunksMetadata {
     }
 }
 
-crate::impl_serdeany!(NautilusChunksMetadata);
+libafl_bolts::impl_serdeany!(NautilusChunksMetadata);
 
 impl NautilusChunksMetadata {
     /// Creates a new [`NautilusChunksMetadata`]
@@ -82,7 +82,10 @@ impl<'a, S> Named for NautilusFeedback<'a, S> {
 
 impl<'a, S> Feedback<S> for NautilusFeedback<'a, S>
 where
-    S: HasMetadata + HasClientPerfMonitor + UsesInput<Input = NautilusInput>,
+    S: HasMetadata
+        + HasClientPerfMonitor
+        + UsesInput<Input = NautilusInput>
+        + HasCorpus<Input = NautilusInput>,
 {
     #[allow(clippy::wrong_self_convention)]
     fn is_interesting<EM, OT>(
@@ -109,7 +112,8 @@ where
     where
         OT: ObserversTuple<S>,
     {
-        let input = testcase.load_input()?.clone();
+        state.corpus().load_input_into(testcase)?;
+        let input = testcase.input().as_ref().unwrap().clone();
         let meta = state
             .metadata_map_mut()
             .get_mut::<NautilusChunksMetadata>()

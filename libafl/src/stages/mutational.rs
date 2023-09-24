@@ -3,15 +3,16 @@
 
 use core::marker::PhantomData;
 
+use libafl_bolts::rands::Rand;
+
 #[cfg(feature = "introspection")]
 use crate::monitors::PerfFeature;
 use crate::{
-    bolts::rands::Rand,
     corpus::{Corpus, CorpusId, Testcase},
     fuzzer::Evaluator,
     inputs::Input,
     mark_feature_time,
-    mutators::Mutator,
+    mutators::{MultiMutator, MutationResult, Mutator},
     stages::Stage,
     start_timer,
     state::{HasClientPerfMonitor, HasCorpus, HasRand, UsesState},
@@ -64,16 +65,18 @@ where
 impl<I, S> MutatedTransform<I, S> for I
 where
     I: Input + Clone,
+    S: HasCorpus<Input = I>,
 {
     type Post = ();
 
     #[inline]
     fn try_transform_from(
         base: &mut Testcase<I>,
-        _state: &S,
+        state: &S,
         _corpus_idx: CorpusId,
     ) -> Result<Self, Error> {
-        Ok(base.load_input()?.clone())
+        state.corpus().load_input_into(base)?;
+        Ok(base.input().as_ref().unwrap().clone())
     }
 
     #[inline]
@@ -117,7 +120,9 @@ where
 
         start_timer!(state);
         let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
-        let Ok(input) = I::try_transform_from(&mut testcase, state, corpus_idx) else { return Ok(()); };
+        let Ok(input) = I::try_transform_from(&mut testcase, state, corpus_idx) else {
+            return Ok(());
+        };
         drop(testcase);
         mark_feature_time!(state, PerfFeature::GetInputFromCorpus);
 
@@ -125,8 +130,12 @@ where
             let mut input = input.clone();
 
             start_timer!(state);
-            self.mutator_mut().mutate(state, &mut input, i as i32)?;
+            let mutated = self.mutator_mut().mutate(state, &mut input, i as i32)?;
             mark_feature_time!(state, PerfFeature::Mutate);
+
+            if mutated == MutationResult::Skipped {
+                continue;
+            }
 
             // Time is measured directly the `evaluate_input` function
             let (untransformed, post) = input.try_transform_into(state)?;
@@ -137,6 +146,7 @@ where
             post.post_exec(state, i as i32, corpus_idx)?;
             mark_feature_time!(state, PerfFeature::MutatePostExec);
         }
+
         Ok(())
     }
 }
@@ -149,6 +159,7 @@ pub static DEFAULT_MUTATIONAL_MAX_ITERATIONS: u64 = 128;
 #[derive(Clone, Debug)]
 pub struct StdMutationalStage<E, EM, I, M, Z> {
     mutator: M,
+    max_iterations: u64,
     #[allow(clippy::type_complexity)]
     phantom: PhantomData<(E, EM, I, Z)>,
 }
@@ -176,7 +187,7 @@ where
 
     /// Gets the number of iterations as a random number
     fn iterations(&self, state: &mut Z::State, _corpus_idx: CorpusId) -> Result<u64, Error> {
-        Ok(1 + state.rand_mut().below(DEFAULT_MUTATIONAL_MAX_ITERATIONS))
+        Ok(1 + state.rand_mut().below(self.max_iterations))
     }
 }
 
@@ -229,7 +240,12 @@ where
 {
     /// Creates a new default mutational stage
     pub fn new(mutator: M) -> Self {
-        Self::transforming(mutator)
+        Self::transforming_with_max_iterations(mutator, DEFAULT_MUTATIONAL_MAX_ITERATIONS)
+    }
+
+    /// Creates a new mutational stage with the given max iterations
+    pub fn with_max_iterations(mutator: M, max_iterations: u64) -> Self {
+        Self::transforming_with_max_iterations(mutator, max_iterations)
     }
 }
 
@@ -238,6 +254,103 @@ where
     E: UsesState<State = Z::State>,
     EM: UsesState<State = Z::State>,
     M: Mutator<I, Z::State>,
+    Z: Evaluator<E, EM>,
+    Z::State: HasClientPerfMonitor + HasCorpus + HasRand,
+{
+    /// Creates a new transforming mutational stage with the default max iterations
+    pub fn transforming(mutator: M) -> Self {
+        Self::transforming_with_max_iterations(mutator, DEFAULT_MUTATIONAL_MAX_ITERATIONS)
+    }
+
+    /// Creates a new transforming mutational stage with the given max iterations
+    pub fn transforming_with_max_iterations(mutator: M, max_iterations: u64) -> Self {
+        Self {
+            mutator,
+            max_iterations,
+            phantom: PhantomData,
+        }
+    }
+}
+
+/// The default mutational stage
+#[derive(Clone, Debug)]
+pub struct MultiMutationalStage<E, EM, I, M, Z> {
+    mutator: M,
+    #[allow(clippy::type_complexity)]
+    phantom: PhantomData<(E, EM, I, Z)>,
+}
+
+impl<E, EM, I, M, Z> UsesState for MultiMutationalStage<E, EM, I, M, Z>
+where
+    E: UsesState<State = Z::State>,
+    EM: UsesState<State = Z::State>,
+    M: MultiMutator<I, Z::State>,
+    Z: Evaluator<E, EM>,
+    Z::State: HasClientPerfMonitor + HasCorpus + HasRand,
+{
+    type State = Z::State;
+}
+
+impl<E, EM, I, M, Z> Stage<E, EM, Z> for MultiMutationalStage<E, EM, I, M, Z>
+where
+    E: UsesState<State = Z::State>,
+    EM: UsesState<State = Z::State>,
+    M: MultiMutator<I, Z::State>,
+    Z: Evaluator<E, EM>,
+    Z::State: HasClientPerfMonitor + HasCorpus + HasRand,
+    I: MutatedTransform<Self::Input, Self::State> + Clone,
+{
+    #[inline]
+    #[allow(clippy::let_and_return)]
+    #[allow(clippy::cast_possible_wrap)]
+    fn perform(
+        &mut self,
+        fuzzer: &mut Z,
+        executor: &mut E,
+        state: &mut Z::State,
+        manager: &mut EM,
+        corpus_idx: CorpusId,
+    ) -> Result<(), Error> {
+        let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
+        let Ok(input) = I::try_transform_from(&mut testcase, state, corpus_idx) else {
+            return Ok(());
+        };
+        drop(testcase);
+
+        let generated = self.mutator.multi_mutate(state, &input, 0, None)?;
+        // println!("Generated {}", generated.len());
+        for (i, new_input) in generated.into_iter().enumerate() {
+            // Time is measured directly the `evaluate_input` function
+            let (untransformed, post) = new_input.try_transform_into(state)?;
+            let (_, corpus_idx) = fuzzer.evaluate_input(state, executor, manager, untransformed)?;
+            self.mutator.multi_post_exec(state, i as i32, corpus_idx)?;
+            post.post_exec(state, i as i32, corpus_idx)?;
+        }
+        // println!("Found {}", found);
+
+        Ok(())
+    }
+}
+
+impl<E, EM, M, Z> MultiMutationalStage<E, EM, Z::Input, M, Z>
+where
+    E: UsesState<State = Z::State>,
+    EM: UsesState<State = Z::State>,
+    M: MultiMutator<Z::Input, Z::State>,
+    Z: Evaluator<E, EM>,
+    Z::State: HasClientPerfMonitor + HasCorpus + HasRand,
+{
+    /// Creates a new default mutational stage
+    pub fn new(mutator: M) -> Self {
+        Self::transforming(mutator)
+    }
+}
+
+impl<E, EM, I, M, Z> MultiMutationalStage<E, EM, I, M, Z>
+where
+    E: UsesState<State = Z::State>,
+    EM: UsesState<State = Z::State>,
+    M: MultiMutator<I, Z::State>,
     Z: Evaluator<E, EM>,
     Z::State: HasClientPerfMonitor + HasCorpus + HasRand,
 {

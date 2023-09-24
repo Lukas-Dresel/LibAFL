@@ -49,7 +49,6 @@
         overflowing_literals,
         path_statements,
         patterns_in_fns_without_body,
-        private_in_public,
         unconditional_recursion,
         unused,
         unused_allocation,
@@ -68,6 +67,6 @@ use syn::{parse_macro_input, DeriveInput};
 pub fn libafl_serdeany_derive(input: TokenStream) -> TokenStream {
     let name = parse_macro_input!(input as DeriveInput).ident;
     TokenStream::from(quote! {
-        libafl::impl_serdeany!(#name);
+        libafl_bolts::impl_serdeany!(#name);
     })
 }

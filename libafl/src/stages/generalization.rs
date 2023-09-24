@@ -6,10 +6,11 @@ use alloc::{
 };
 use core::{fmt::Debug, marker::PhantomData};
 
+use libafl_bolts::AsSlice;
+
 #[cfg(feature = "introspection")]
 use crate::monitors::PerfFeature;
 use crate::{
-    bolts::AsSlice,
     corpus::{Corpus, CorpusId},
     executors::{Executor, HasObservers},
     feedbacks::map::MapNoveltiesMetadata,
@@ -24,7 +25,7 @@ use crate::{
 
 const MAX_GENERALIZED_LEN: usize = 8192;
 
-fn increment_by_offset(_list: &[Option<u8>], idx: usize, off: u8) -> usize {
+const fn increment_by_offset(_list: &[Option<u8>], idx: usize, off: u8) -> usize {
     idx + 1 + off as usize
 }
 
@@ -79,10 +80,17 @@ where
     ) -> Result<(), Error> {
         let (mut payload, original, novelties) = {
             start_timer!(state);
-            state.corpus().get(corpus_idx)?.borrow_mut().load_input()?;
+            {
+                let corpus = state.corpus();
+                let mut testcase = corpus.get(corpus_idx)?.borrow_mut();
+                if testcase.scheduled_count() > 0 {
+                    return Ok(());
+                }
+
+                corpus.load_input_into(&mut testcase)?;
+            }
             mark_feature_time!(state, PerfFeature::GetInputFromCorpus);
             let mut entry = state.corpus().get(corpus_idx)?.borrow_mut();
-
             let input = entry.input_mut().as_mut().unwrap();
 
             let payload: Vec<_> = input.bytes().iter().map(|&x| Some(x)).collect();
@@ -92,6 +100,9 @@ where
                         "MapNoveltiesMetadata needed for GeneralizationStage not found in testcase #{corpus_idx} (check the arguments of MapFeedback::new(...))"
                     ))
                 })?;
+            if meta.as_slice().is_empty() {
+                return Ok(()); // don't generalise inputs which don't have novelties
+            }
             (payload, original, meta.as_slice().to_vec())
         };
 

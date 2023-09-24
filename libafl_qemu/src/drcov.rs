@@ -9,8 +9,7 @@ use rangemap::RangeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    blocks::pc2basicblock,
-    emu::GuestAddr,
+    emu::{GuestAddr, GuestUsize},
     helper::{QemuHelper, QemuHelperTuple, QemuInstrumentationFilter},
     hooks::QemuHooks,
     Emulator,
@@ -18,7 +17,12 @@ use crate::{
 
 static DRCOV_IDS: Mutex<Option<Vec<u64>>> = Mutex::new(None);
 static DRCOV_MAP: Mutex<Option<HashMap<GuestAddr, u64>>> = Mutex::new(None);
+static DRCOV_LENGTHS: Mutex<Option<HashMap<GuestAddr, GuestUsize>>> = Mutex::new(None);
 
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct QemuDrCovMetadata {
     pub current_id: u64,
@@ -31,7 +35,7 @@ impl QemuDrCovMetadata {
     }
 }
 
-libafl::impl_serdeany!(QemuDrCovMetadata);
+libafl_bolts::impl_serdeany!(QemuDrCovMetadata);
 
 #[derive(Debug)]
 pub struct QemuDrCovHelper {
@@ -55,6 +59,7 @@ impl QemuDrCovHelper {
             let _ = DRCOV_IDS.lock().unwrap().insert(vec![]);
         }
         let _ = DRCOV_MAP.lock().unwrap().insert(HashMap::new());
+        let _ = DRCOV_LENGTHS.lock().unwrap().insert(HashMap::new());
         Self {
             filter,
             module_mapping,
@@ -80,6 +85,7 @@ where
     {
         hooks.blocks(
             Some(gen_unique_block_ids::<QT, S>),
+            Some(gen_block_lengths::<QT, S>),
             Some(exec_trace_block::<QT, S>),
         );
     }
@@ -88,18 +94,20 @@ where
 
     fn post_exec<OT>(
         &mut self,
-        emulator: &Emulator,
+        _emulator: &Emulator,
         _input: &S::Input,
         _observers: &mut OT,
         _exit_kind: &mut ExitKind,
     ) where
         OT: ObserversTuple<S>,
     {
+        let lengths_opt = DRCOV_LENGTHS.lock().unwrap();
+        let lengths = lengths_opt.as_ref().unwrap();
         if self.full_trace {
             if DRCOV_IDS.lock().unwrap().as_ref().unwrap().len() > self.drcov_len {
                 let mut drcov_vec = Vec::<DrCovBasicBlock>::new();
-                for id in DRCOV_IDS.lock().unwrap().as_ref().unwrap().iter() {
-                    'pcs_full: for (pc, idm) in DRCOV_MAP.lock().unwrap().as_ref().unwrap().iter() {
+                for id in DRCOV_IDS.lock().unwrap().as_ref().unwrap() {
+                    'pcs_full: for (pc, idm) in DRCOV_MAP.lock().unwrap().as_ref().unwrap() {
                         let mut module_found = false;
                         for module in self.module_mapping.iter() {
                             let (range, (_, _)) = module;
@@ -114,27 +122,16 @@ where
                             continue 'pcs_full;
                         }
                         if *idm == *id {
-                            #[cfg(cpu_target = "arm")]
-                            let mode = if pc & 1 == 1 {
-                                Some(capstone::arch::arm::ArchMode::Thumb.into())
-                            } else {
-                                Some(capstone::arch::arm::ArchMode::Arm.into())
-                            };
-                            #[cfg(not(cpu_target = "arm"))]
-                            let mode = None;
-
-                            match pc2basicblock(*pc, emulator, mode) {
-                                Ok(block) => {
-                                    let mut block_len = 0;
-                                    for instr in &block {
-                                        block_len += instr.insn_len;
-                                    }
+                            match lengths.get(pc) {
+                                Some(block_length) => {
                                     drcov_vec.push(DrCovBasicBlock::new(
                                         *pc as usize,
-                                        *pc as usize + block_len,
+                                        *pc as usize + *block_length as usize,
                                     ));
                                 }
-                                Err(r) => log::info!("{r:#?}"),
+                                None => {
+                                    log::info!("Failed to find block length for: {pc:}");
+                                }
                             }
                         }
                     }
@@ -148,7 +145,7 @@ where
         } else {
             if DRCOV_MAP.lock().unwrap().as_ref().unwrap().len() > self.drcov_len {
                 let mut drcov_vec = Vec::<DrCovBasicBlock>::new();
-                'pcs: for (pc, _) in DRCOV_MAP.lock().unwrap().as_ref().unwrap().iter() {
+                'pcs: for (pc, _) in DRCOV_MAP.lock().unwrap().as_ref().unwrap() {
                     let mut module_found = false;
                     for module in self.module_mapping.iter() {
                         let (range, (_, _)) = module;
@@ -162,26 +159,16 @@ where
                     if !module_found {
                         continue 'pcs;
                     }
-
-                    #[cfg(cpu_target = "arm")]
-                    let mode = if pc & 1 == 1 {
-                        Some(capstone::arch::arm::ArchMode::Thumb.into())
-                    } else {
-                        Some(capstone::arch::arm::ArchMode::Arm.into())
-                    };
-                    #[cfg(not(cpu_target = "arm"))]
-                    let mode = None;
-
-                    match pc2basicblock(*pc, emulator, mode) {
-                        Ok(block) => {
-                            let mut block_len = 0;
-                            for instr in &block {
-                                block_len += instr.insn_len;
-                            }
-                            drcov_vec
-                                .push(DrCovBasicBlock::new(*pc as usize, *pc as usize + block_len));
+                    match lengths.get(pc) {
+                        Some(block_length) => {
+                            drcov_vec.push(DrCovBasicBlock::new(
+                                *pc as usize,
+                                *pc as usize + *block_length as usize,
+                            ));
                         }
-                        Err(r) => log::info!("{r:#?}"),
+                        None => {
+                            log::info!("Failed to find block length for: {pc:}");
+                        }
                     }
                 }
 
@@ -247,6 +234,31 @@ where
             }
         }
     }
+}
+
+pub fn gen_block_lengths<QT, S>(
+    hooks: &mut QemuHooks<'_, QT, S>,
+    _state: Option<&mut S>,
+    pc: GuestAddr,
+    block_length: GuestUsize,
+) where
+    S: HasMetadata,
+    S: UsesInput,
+    QT: QemuHelperTuple<S>,
+{
+    let drcov_helper = hooks
+        .helpers()
+        .match_first_type::<QemuDrCovHelper>()
+        .unwrap();
+    if !drcov_helper.must_instrument(pc) {
+        return;
+    }
+    DRCOV_LENGTHS
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .insert(pc, block_length);
 }
 
 pub fn exec_trace_block<QT, S>(hooks: &mut QemuHooks<'_, QT, S>, _state: Option<&mut S>, id: u64)

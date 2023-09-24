@@ -111,7 +111,7 @@ impl core::fmt::Debug for AsanGiovese {
         f.debug_struct("AsanGiovese")
             .field("alloc_tree", &self.alloc_tree)
             .field("dirty_shadow", &self.dirty_shadow)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -395,7 +395,7 @@ impl AsanGiovese {
         if self.snapshot_shadow {
             let set = self.dirty_shadow.lock().unwrap();
 
-            for &page in set.iter() {
+            for &page in &*set {
                 let data = Self::get_shadow_page(emu, page).to_vec();
                 self.saved_shadow.insert(page, data);
             }
@@ -418,14 +418,14 @@ impl AsanGiovese {
             }
 
             if self.snapshot_shadow {
-                tree.clear();
+                *tree = self.saved_tree.clone();
             }
         }
 
         if self.snapshot_shadow {
             let mut set = self.dirty_shadow.lock().unwrap();
 
-            for &page in set.iter() {
+            for &page in &*set {
                 let original = self.saved_shadow.get(&page);
                 if let Some(data) = original {
                     let cur = Self::get_shadow_page(emu, page);
@@ -472,7 +472,7 @@ pub fn init_with_asan(
         |e: &str| "LD_PRELOAD=".to_string() + &asan_lib + " " + &e["LD_PRELOAD=".len()..];
 
     let mut added = false;
-    for (k, v) in env.iter_mut() {
+    for (k, v) in &mut *env {
         if k == "QEMU_SET_ENV" {
             let mut new_v = vec![];
             for e in v.split(',') {

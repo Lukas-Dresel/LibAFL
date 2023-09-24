@@ -6,10 +6,10 @@ use alloc::{
 };
 use core::{cmp::Ordering, fmt::Debug, marker::PhantomData, ops::Range};
 
+use libafl_bolts::{rands::Rand, tuples::MatchName};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bolts::{rands::Rand, tuples::MatchName},
     corpus::{Corpus, CorpusId},
     events::EventFirer,
     executors::{Executor, HasObservers},
@@ -27,7 +27,7 @@ struct Bigger(Range<usize>);
 
 impl PartialOrd for Bigger {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.0.len().partial_cmp(&other.0.len())
+        Some(self.cmp(other))
     }
 }
 
@@ -43,7 +43,7 @@ struct Earlier(Range<usize>);
 
 impl PartialOrd for Earlier {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        other.0.start.partial_cmp(&self.0.start)
+        Some(self.cmp(other))
     }
 }
 
@@ -101,8 +101,12 @@ where
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
 /// Store the taint and the input
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 pub struct TaintMetadata {
     input_vec: Vec<u8>,
     ranges: Vec<Range<usize>>,
@@ -134,7 +138,7 @@ impl TaintMetadata {
     }
 }
 
-crate::impl_serdeany!(TaintMetadata);
+libafl_bolts::impl_serdeany!(TaintMetadata);
 
 impl<EM, O, E, Z> ColorizationStage<EM, O, E, Z>
 where
@@ -155,13 +159,7 @@ where
         corpus_idx: CorpusId,
         name: &str,
     ) -> Result<E::Input, Error> {
-        let mut input = state
-            .corpus()
-            .get(corpus_idx)?
-            .borrow_mut()
-            .load_input()
-            .unwrap()
-            .clone();
+        let mut input = state.corpus().cloned_input_for_id(corpus_idx)?;
         // The backup of the input
         let backup = input.clone();
         // This is the buffer we'll randomly mutate during type_replace

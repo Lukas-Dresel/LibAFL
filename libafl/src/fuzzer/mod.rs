@@ -3,6 +3,7 @@
 use alloc::string::ToString;
 use core::{fmt::Debug, marker::PhantomData, time::Duration};
 
+use libafl_bolts::current_time;
 use serde::{de::DeserializeOwned, Serialize};
 
 #[cfg(test)]
@@ -12,8 +13,7 @@ use crate::monitors::PerfFeature;
 #[cfg(test)]
 use crate::state::NopState;
 use crate::{
-    bolts::current_time,
-    corpus::{Corpus, CorpusId, Testcase},
+    corpus::{Corpus, CorpusId, HasTestcase, Testcase},
     events::{Event, EventConfig, EventFirer, EventProcessor, ProgressReporter},
     executors::{Executor, ExitKind, HasObservers},
     feedbacks::Feedback,
@@ -23,7 +23,10 @@ use crate::{
     schedulers::Scheduler,
     stages::StagesTuple,
     start_timer,
-    state::{HasClientPerfMonitor, HasCorpus, HasExecutions, HasMetadata, HasSolutions, UsesState},
+    state::{
+        HasClientPerfMonitor, HasCorpus, HasExecutions, HasImported, HasLastReportTime,
+        HasMetadata, HasSolutions, UsesState,
+    },
     Error,
 };
 
@@ -31,7 +34,10 @@ use crate::{
 const STATS_TIMEOUT_DEFAULT: Duration = Duration::from_secs(15);
 
 /// Holds a scheduler
-pub trait HasScheduler: UsesState {
+pub trait HasScheduler: UsesState
+where
+    Self::State: HasCorpus,
+{
     /// The [`Scheduler`] for this fuzzer
     type Scheduler: Scheduler<State = Self::State>;
 
@@ -152,7 +158,7 @@ where
 /// The main fuzzer trait.
 pub trait Fuzzer<E, EM, ST>: Sized + UsesState
 where
-    Self::State: HasClientPerfMonitor + HasMetadata + HasExecutions,
+    Self::State: HasClientPerfMonitor + HasMetadata + HasExecutions + HasLastReportTime,
     E: UsesState<State = Self::State>,
     EM: ProgressReporter<State = Self::State>,
     ST: StagesTuple<E, EM, Self::State, Self>,
@@ -182,11 +188,10 @@ where
         state: &mut EM::State,
         manager: &mut EM,
     ) -> Result<CorpusId, Error> {
-        let mut last = current_time();
         let monitor_timeout = STATS_TIMEOUT_DEFAULT;
         loop {
+            manager.maybe_report_progress(state, monitor_timeout)?;
             self.fuzz_one(stages, executor, state, manager)?;
-            last = manager.maybe_report_progress(state, last, monitor_timeout)?;
         }
     }
 
@@ -214,13 +219,14 @@ where
         }
 
         let mut ret = None;
-        let mut last = current_time();
         let monitor_timeout = STATS_TIMEOUT_DEFAULT;
 
         for _ in 0..iters {
+            manager.maybe_report_progress(state, monitor_timeout)?;
             ret = Some(self.fuzz_one(stages, executor, state, manager)?);
-            last = manager.maybe_report_progress(state, last, monitor_timeout)?;
         }
+
+        manager.report_progress(state)?;
 
         // If we would assume the fuzzer loop will always exit after this, we could do this here:
         // manager.on_restart(state)?;
@@ -249,7 +255,7 @@ where
     CS: Scheduler,
     F: Feedback<CS::State>,
     OF: Feedback<CS::State>,
-    CS::State: HasClientPerfMonitor,
+    CS::State: HasClientPerfMonitor + HasCorpus,
 {
     scheduler: CS,
     feedback: F,
@@ -262,7 +268,7 @@ where
     CS: Scheduler,
     F: Feedback<CS::State>,
     OF: Feedback<CS::State>,
-    CS::State: HasClientPerfMonitor,
+    CS::State: HasClientPerfMonitor + HasCorpus,
 {
     type State = CS::State;
 }
@@ -272,7 +278,7 @@ where
     CS: Scheduler,
     F: Feedback<CS::State>,
     OF: Feedback<CS::State>,
-    CS::State: HasClientPerfMonitor,
+    CS::State: HasClientPerfMonitor + HasCorpus,
 {
     type Scheduler = CS;
 
@@ -290,7 +296,7 @@ where
     CS: Scheduler,
     F: Feedback<CS::State>,
     OF: Feedback<CS::State>,
-    CS::State: HasClientPerfMonitor,
+    CS::State: HasClientPerfMonitor + HasCorpus,
 {
     type Feedback = F;
 
@@ -308,7 +314,7 @@ where
     CS: Scheduler,
     F: Feedback<CS::State>,
     OF: Feedback<CS::State>,
-    CS::State: HasClientPerfMonitor,
+    CS::State: HasClientPerfMonitor + HasCorpus,
 {
     type Objective = OF;
 
@@ -327,14 +333,15 @@ where
     F: Feedback<CS::State>,
     OF: Feedback<CS::State>,
     OT: ObserversTuple<CS::State> + Serialize + DeserializeOwned,
-    CS::State: HasCorpus + HasSolutions + HasClientPerfMonitor + HasExecutions,
+    CS::State:
+        HasCorpus + HasSolutions + HasClientPerfMonitor + HasExecutions + HasCorpus + HasImported,
 {
     /// Evaluate if a set of observation channels has an interesting state
     fn process_execution<EM>(
         &mut self,
-        state: &mut CS::State,
+        state: &mut Self::State,
         manager: &mut EM,
-        input: <CS::State as UsesInput>::Input,
+        input: <Self::State as UsesInput>::Input,
         observers: &OT,
         exit_kind: &ExitKind,
         send_events: bool,
@@ -394,7 +401,7 @@ where
                     let observers_buf = if manager.configuration() == EventConfig::AlwaysUnique {
                         None
                     } else {
-                        Some(manager.serialize_observers::<OT>(observers)?)
+                        manager.serialize_observers::<OT>(observers)?
                     };
                     manager.fire(
                         state,
@@ -406,8 +413,12 @@ where
                             client_config: manager.configuration(),
                             time: current_time(),
                             executions: *state.executions(),
+                            forward_id: None,
                         },
                     )?;
+                } else {
+                    // This testcase is from the other fuzzers.
+                    *state.imported_mut() += 1;
                 }
                 Ok((res, Some(idx)))
             }
@@ -443,7 +454,7 @@ where
     OT: ObserversTuple<CS::State> + Serialize + DeserializeOwned,
     F: Feedback<CS::State>,
     OF: Feedback<CS::State>,
-    CS::State: HasCorpus + HasSolutions + HasClientPerfMonitor + HasExecutions,
+    CS::State: HasCorpus + HasSolutions + HasClientPerfMonitor + HasExecutions + HasImported,
 {
     /// Process one input, adding to the respective corpora if needed and firing the right events
     #[inline]
@@ -476,16 +487,16 @@ where
     F: Feedback<CS::State>,
     OF: Feedback<CS::State>,
     OT: ObserversTuple<CS::State> + Serialize + DeserializeOwned,
-    CS::State: HasCorpus + HasSolutions + HasClientPerfMonitor + HasExecutions,
+    CS::State: HasCorpus + HasSolutions + HasClientPerfMonitor + HasExecutions + HasImported,
 {
     /// Process one input, adding to the respective corpora if needed and firing the right events
     #[inline]
     fn evaluate_input_events(
         &mut self,
-        state: &mut CS::State,
+        state: &mut Self::State,
         executor: &mut E,
         manager: &mut EM,
-        input: <CS::State as UsesInput>::Input,
+        input: <Self::State as UsesInput>::Input,
         send_events: bool,
     ) -> Result<(ExecuteInputResult, Option<CorpusId>), Error> {
         self.evaluate_input_with_observers(state, executor, manager, input, send_events)
@@ -494,26 +505,57 @@ where
     /// Adds an input, even if it's not considered `interesting` by any of the executors
     fn add_input(
         &mut self,
-        state: &mut CS::State,
+        state: &mut Self::State,
         executor: &mut E,
         manager: &mut EM,
-        input: <CS::State as UsesInput>::Input,
+        input: <Self::State as UsesInput>::Input,
     ) -> Result<CorpusId, Error> {
         let exit_kind = self.execute_input(state, executor, manager, &input)?;
         let observers = executor.observers();
         // Always consider this to be "interesting"
+        let mut testcase = Testcase::with_executions(input.clone(), *state.executions());
+
+        // Maybe a solution
+        #[cfg(not(feature = "introspection"))]
+        let is_solution = self
+            .objective_mut()
+            .is_interesting(state, manager, &input, observers, &exit_kind)?;
+
+        #[cfg(feature = "introspection")]
+        let is_solution = self
+            .objective_mut()
+            .is_interesting_introspection(state, manager, &input, observers, &exit_kind)?;
+
+        if is_solution {
+            self.objective_mut()
+                .append_metadata(state, observers, &mut testcase)?;
+            let idx = state.solutions_mut().add(testcase)?;
+
+            manager.fire(
+                state,
+                Event::Objective {
+                    objective_size: state.solutions().count(),
+                },
+            )?;
+            return Ok(idx);
+        }
 
         // Not a solution
         self.objective_mut().discard_metadata(state, &input)?;
 
         // several is_interesting implementations collect some data about the run, later used in
         // append_metadata; we *must* invoke is_interesting here to collect it
-        let _: bool = self
+        #[cfg(not(feature = "introspection"))]
+        let _is_corpus = self
             .feedback_mut()
             .is_interesting(state, manager, &input, observers, &exit_kind)?;
 
+        #[cfg(feature = "introspection")]
+        let _is_corpus = self
+            .feedback_mut()
+            .is_interesting_introspection(state, manager, &input, observers, &exit_kind)?;
+
         // Add the input to the main corpus
-        let mut testcase = Testcase::with_executions(input.clone(), *state.executions());
         self.feedback_mut()
             .append_metadata(state, observers, &mut testcase)?;
         let idx = state.corpus_mut().add(testcase)?;
@@ -522,7 +564,7 @@ where
         let observers_buf = if manager.configuration() == EventConfig::AlwaysUnique {
             None
         } else {
-            Some(manager.serialize_observers::<OT>(observers)?)
+            manager.serialize_observers::<OT>(observers)?
         };
         manager.fire(
             state,
@@ -534,6 +576,7 @@ where
                 client_config: manager.configuration(),
                 time: current_time(),
                 executions: *state.executions(),
+                forward_id: None,
             },
         )?;
         Ok(idx)
@@ -547,7 +590,13 @@ where
     EM: ProgressReporter + EventProcessor<E, Self, State = CS::State>,
     F: Feedback<CS::State>,
     OF: Feedback<CS::State>,
-    CS::State: HasClientPerfMonitor + HasExecutions + HasMetadata,
+    CS::State: HasClientPerfMonitor
+        + HasExecutions
+        + HasMetadata
+        + HasCorpus
+        + HasTestcase
+        + HasImported
+        + HasLastReportTime,
     ST: StagesTuple<E, EM, CS::State, Self>,
 {
     fn fuzz_one(
@@ -586,6 +635,12 @@ where
         #[cfg(feature = "introspection")]
         state.introspection_monitor_mut().mark_manager_time();
 
+        {
+            let mut testcase = state.testcase_mut(idx)?;
+            let scheduled_count = testcase.scheduled_count();
+            // increase scheduled count, this was fuzz_level in afl
+            testcase.set_scheduled_count(scheduled_count + 1);
+        }
         Ok(idx)
     }
 }
@@ -595,7 +650,7 @@ where
     CS: Scheduler,
     F: Feedback<CS::State>,
     OF: Feedback<CS::State>,
-    CS::State: UsesInput + HasExecutions + HasClientPerfMonitor,
+    CS::State: UsesInput + HasExecutions + HasClientPerfMonitor + HasCorpus,
 {
     /// Create a new `StdFuzzer` with standard behavior.
     pub fn new(scheduler: CS, feedback: F, objective: OF) -> Self {
@@ -663,7 +718,7 @@ where
     OF: Feedback<CS::State>,
     E: Executor<EM, Self> + HasObservers<State = CS::State>,
     EM: UsesState<State = CS::State>,
-    CS::State: UsesInput + HasExecutions + HasClientPerfMonitor,
+    CS::State: UsesInput + HasExecutions + HasClientPerfMonitor + HasCorpus,
 {
     /// Runs the input and triggers observers and feedback
     fn execute_input(
@@ -741,10 +796,10 @@ where
 pub mod pybind {
     use alloc::{boxed::Box, vec::Vec};
 
+    use libafl_bolts::ownedref::OwnedMutPtr;
     use pyo3::prelude::*;
 
     use crate::{
-        bolts::ownedref::OwnedMutPtr,
         events::pybind::PythonEventManager,
         executors::pybind::PythonExecutor,
         feedbacks::pybind::PythonFeedback,

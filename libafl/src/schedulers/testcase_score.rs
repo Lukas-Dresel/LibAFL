@@ -2,8 +2,9 @@
 use alloc::string::{String, ToString};
 use core::marker::PhantomData;
 
+use libafl_bolts::{HasLen, HasRefCnt};
+
 use crate::{
-    bolts::{HasLen, HasRefCnt},
     corpus::{Corpus, SchedulerTestcaseMetadata, Testcase},
     feedbacks::MapIndexesMetadata,
     schedulers::{
@@ -14,13 +15,13 @@ use crate::{
     Error,
 };
 
-/// Compute the favor factor of a [`Testcase`]. Lower is better.
+/// Compute the favor factor of a [`Testcase`]. Higher is better.
 pub trait TestcaseScore<S>
 where
     S: HasMetadata + HasCorpus,
 {
-    /// Computes the favor factor of a [`Testcase`]. Lower is better.
-    fn compute(entry: &mut Testcase<S::Input>, state: &S) -> Result<f64, Error>;
+    /// Computes the favor factor of a [`Testcase`]. Higher is better.
+    fn compute(state: &S, entry: &mut Testcase<S::Input>) -> Result<f64, Error>;
 }
 
 /// Multiply the testcase size with the execution time.
@@ -36,9 +37,10 @@ where
     S::Input: HasLen,
 {
     #[allow(clippy::cast_precision_loss, clippy::cast_lossless)]
-    fn compute(entry: &mut Testcase<S::Input>, _state: &S) -> Result<f64, Error> {
+    fn compute(state: &S, entry: &mut Testcase<S::Input>) -> Result<f64, Error> {
         // TODO maybe enforce entry.exec_time().is_some()
-        Ok(entry.exec_time().map_or(1, |d| d.as_millis()) as f64 * entry.cached_len()? as f64)
+        Ok(entry.exec_time().map_or(1, |d| d.as_millis()) as f64
+            * entry.load_len(state.corpus())? as f64)
     }
 }
 
@@ -65,7 +67,7 @@ where
         clippy::cast_sign_loss,
         clippy::cast_lossless
     )]
-    fn compute(entry: &mut Testcase<S::Input>, state: &S) -> Result<f64, Error> {
+    fn compute(state: &S, entry: &mut Testcase<S::Input>) -> Result<f64, Error> {
         let psmeta = state.metadata::<SchedulerMetadata>()?;
 
         let fuzz_mu = if let Some(strat) = psmeta.strat() {
@@ -110,7 +112,11 @@ where
             .as_nanos() as f64;
 
         let avg_exec_us = psmeta.exec_time().as_nanos() as f64 / psmeta.cycles() as f64;
-        let avg_bitmap_size = psmeta.bitmap_size() / psmeta.bitmap_entries();
+        let avg_bitmap_size = if psmeta.bitmap_entries() == 0 {
+            1
+        } else {
+            psmeta.bitmap_size() / psmeta.bitmap_entries()
+        };
 
         let favored = entry.has_metadata::<IsFavoredMetadata>();
         let tcmeta = entry.metadata::<SchedulerTestcaseMetadata>()?;
@@ -273,7 +279,7 @@ where
 {
     /// Compute the `weight` used in weighted corpus entry selection algo
     #[allow(clippy::cast_precision_loss, clippy::cast_lossless)]
-    fn compute(entry: &mut Testcase<S::Input>, state: &S) -> Result<f64, Error> {
+    fn compute(state: &S, entry: &mut Testcase<S::Input>) -> Result<f64, Error> {
         let mut weight = 1.0;
         let psmeta = state.metadata::<SchedulerMetadata>()?;
 

@@ -10,13 +10,13 @@ use core::{
     fmt::{self, Debug, Formatter},
     ptr::addr_of_mut,
 };
-use std::{ffi::c_void, num::NonZeroUsize, ptr::write_volatile};
+use std::{ffi::c_void, num::NonZeroUsize, ptr::write_volatile, rc::Rc};
 
 use backtrace::Backtrace;
 #[cfg(target_arch = "x86_64")]
 use capstone::{
     arch::{self, x86::X86OperandType, ArchOperand::X86Operand, BuildsCapstone},
-    Capstone, Insn, RegAccessType, RegId,
+    Capstone, RegAccessType, RegId,
 };
 #[cfg(target_arch = "aarch64")]
 use capstone::{
@@ -25,7 +25,7 @@ use capstone::{
         ArchOperand::Arm64Operand,
         BuildsCapstone,
     },
-    Capstone, Insn,
+    Capstone,
 };
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 #[cfg(target_arch = "x86_64")]
@@ -36,8 +36,10 @@ use frida_gum::{
     instruction_writer::InstructionWriter, interceptor::Interceptor, stalker::StalkerOutput, Gum,
     Module, ModuleDetails, ModuleMap, NativePointer, RangeDetails,
 };
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use frida_gum_sys::Insn;
 use hashbrown::HashMap;
-use libafl::bolts::{cli::FuzzerOptions, AsSlice};
+use libafl_bolts::{cli::FuzzerOptions, AsSlice};
 #[cfg(unix)]
 use libc::RLIMIT_STACK;
 use libc::{c_char, wchar_t};
@@ -48,12 +50,14 @@ use libc::{getrlimit64, rlimit64};
 use nix::sys::mman::{mmap, MapFlags, ProtFlags};
 use rangemap::RangeMap;
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+use crate::utils::frida_to_cs;
 #[cfg(target_arch = "aarch64")]
 use crate::utils::instruction_width;
 use crate::{
     alloc::Allocator,
     asan::errors::{AsanError, AsanErrors, AsanReadWriteError, ASAN_ERRORS},
-    helper::FridaRuntime,
+    helper::{FridaRuntime, SkipRange},
     utils::writer_register,
 };
 
@@ -135,9 +139,10 @@ pub struct AsanRuntime {
     blob_check_mem_48bytes: Option<Box<[u8]>>,
     blob_check_mem_64bytes: Option<Box<[u8]>>,
     stalked_addresses: HashMap<usize, usize>,
-    options: FuzzerOptions,
-    module_map: Option<ModuleMap>,
+    module_map: Option<Rc<ModuleMap>>,
     suppressed_addresses: Vec<usize>,
+    skip_ranges: Vec<SkipRange>,
+    continue_on_error: bool,
     shadow_check_func: Option<extern "C" fn(*const c_void, usize) -> bool>,
 
     #[cfg(target_arch = "aarch64")]
@@ -148,8 +153,9 @@ impl Debug for AsanRuntime {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("AsanRuntime")
             .field("stalked_addresses", &self.stalked_addresses)
-            .field("options", &self.options)
+            .field("continue_on_error", &self.continue_on_error)
             .field("module_map", &"<ModuleMap>")
+            .field("skip_ranges", &self.skip_ranges)
             .field("suppressed_addresses", &self.suppressed_addresses)
             .finish_non_exhaustive()
     }
@@ -163,10 +169,10 @@ impl FridaRuntime for AsanRuntime {
         &mut self,
         gum: &Gum,
         _ranges: &RangeMap<usize, (u16, String)>,
-        modules_to_instrument: &[&str],
+        module_map: &Rc<ModuleMap>,
     ) {
         unsafe {
-            ASAN_ERRORS = Some(AsanErrors::new(self.options.clone()));
+            ASAN_ERRORS = Some(AsanErrors::new(self.continue_on_error));
         }
 
         self.generate_instrumentation_blobs();
@@ -174,14 +180,16 @@ impl FridaRuntime for AsanRuntime {
         self.generate_shadow_check_function();
         self.unpoison_all_existing_memory();
 
-        self.module_map = Some(ModuleMap::new_from_names(gum, modules_to_instrument));
-        if !self.options.dont_instrument.is_empty() {
-            for (module_name, offset) in self.options.dont_instrument.clone() {
-                let module_details = ModuleDetails::with_name(module_name).unwrap();
-                let lib_start = module_details.range().base_address().0 as usize;
-                self.suppressed_addresses.push(lib_start + offset);
-            }
-        }
+        self.module_map = Some(module_map.clone());
+        self.suppressed_addresses
+            .extend(self.skip_ranges.iter().map(|skip| match skip {
+                SkipRange::Absolute(range) => range.start,
+                SkipRange::ModuleRelative { name, range } => {
+                    let module_details = ModuleDetails::with_name(name.clone()).unwrap();
+                    let lib_start = module_details.range().base_address().0 as usize;
+                    lib_start + range.start
+                }
+            }));
 
         self.hook_functions(gum);
         /*
@@ -291,33 +299,22 @@ impl FridaRuntime for AsanRuntime {
 impl AsanRuntime {
     /// Create a new `AsanRuntime`
     #[must_use]
-    pub fn new(options: FuzzerOptions) -> AsanRuntime {
+    pub fn new(options: &FuzzerOptions) -> AsanRuntime {
+        let skip_ranges = options
+            .dont_instrument
+            .iter()
+            .map(|(name, offset)| SkipRange::ModuleRelative {
+                name: name.clone(),
+                range: *offset..*offset + 4,
+            })
+            .collect();
+        let continue_on_error = options.continue_on_error;
         Self {
             check_for_leaks_enabled: options.detect_leaks,
-            current_report_impl: 0,
-            allocator: Allocator::new(options.clone()),
-            regs: [0; ASAN_SAVE_REGISTER_COUNT],
-            blob_report: None,
-            blob_check_mem_byte: None,
-            blob_check_mem_halfword: None,
-            blob_check_mem_dword: None,
-            blob_check_mem_qword: None,
-            blob_check_mem_16bytes: None,
-            blob_check_mem_3bytes: None,
-            blob_check_mem_6bytes: None,
-            blob_check_mem_12bytes: None,
-            blob_check_mem_24bytes: None,
-            blob_check_mem_32bytes: None,
-            blob_check_mem_48bytes: None,
-            blob_check_mem_64bytes: None,
-            stalked_addresses: HashMap::new(),
-            options,
-            module_map: None,
-            suppressed_addresses: Vec::new(),
-            shadow_check_func: None,
-
-            #[cfg(target_arch = "aarch64")]
-            eh_frame: [0; ASAN_EH_FRAME_DWORD_COUNT],
+            allocator: Allocator::new(options),
+            skip_ranges,
+            continue_on_error,
+            ..Self::default()
         }
     }
 
@@ -1094,7 +1091,7 @@ impl AsanRuntime {
                 3,
             )
             .unwrap();
-        let instructions = instructions.iter().collect::<Vec<&Insn>>();
+        let instructions = instructions.iter().collect::<Vec<&capstone::Insn>>();
         let mut insn = instructions.first().unwrap();
         if insn.mnemonic().unwrap() == "msr" && insn.op_str().unwrap() == "nzcv, x0" {
             insn = instructions.get(2).unwrap();
@@ -1668,13 +1665,12 @@ impl AsanRuntime {
         );
 
         let blob = ops.finalize().unwrap();
-        let mut map_flags = MapFlags::MAP_ANON | MapFlags::MAP_PRIVATE;
 
         // apple aarch64 requires MAP_JIT to allocates WX pages
-        #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
-        {
-            map_flags |= MapFlags::MAP_JIT;
-        }
+        #[cfg(target_vendor = "apple")]
+        let map_flags = MapFlags::MAP_ANON | MapFlags::MAP_PRIVATE | MapFlags::MAP_JIT;
+        #[cfg(not(target_vendor = "apple"))]
+        let map_flags = MapFlags::MAP_ANON | MapFlags::MAP_PRIVATE;
 
         unsafe {
             let mapping = mmap(
@@ -2206,9 +2202,13 @@ impl AsanRuntime {
         Arm64Shift,
         Arm64Extender,
     )> {
+        // We need to re-decode frida-internal capstone values to upstream capstone
+        let cs_instr = frida_to_cs(capstone, instr);
+        let cs_instr = cs_instr.first().unwrap();
+
         // We have to ignore these instructions. Simulating them with their side effects is
         // complex, to say the least.
-        match instr.mnemonic().unwrap() {
+        match cs_instr.mnemonic().unwrap() {
             "ldaxr" | "stlxr" | "ldxr" | "stxr" | "ldar" | "stlr" | "ldarb" | "ldarh" | "ldaxp"
             | "ldaxrb" | "ldaxrh" | "stlrb" | "stlrh" | "stlxp" | "stlxrb" | "stlxrh" | "ldxrb"
             | "ldxrh" | "stxrb" | "stxrh" => return None,
@@ -2216,7 +2216,7 @@ impl AsanRuntime {
         }
 
         let operands = capstone
-            .insn_detail(instr)
+            .insn_detail(cs_instr)
             .unwrap()
             .arch_detail()
             .operands();
@@ -2230,7 +2230,7 @@ impl AsanRuntime {
                     opmem.base(),
                     opmem.index(),
                     opmem.disp(),
-                    instruction_width(instr, &operands),
+                    instruction_width(cs_instr, &operands),
                     arm64operand.shift,
                     arm64operand.ext,
                 ));
@@ -2250,15 +2250,18 @@ impl AsanRuntime {
         _address: u64,
         instr: &Insn,
     ) -> Option<(RegId, u8, RegId, RegId, i32, i64)> {
+        // We need to re-decode frida-internal capstone values to upstream capstone
+        let cs_instr = frida_to_cs(capstone, instr);
+        let cs_instr = cs_instr.first().unwrap();
         let operands = capstone
-            .insn_detail(instr)
+            .insn_detail(cs_instr)
             .unwrap()
             .arch_detail()
             .operands();
         // Ignore lea instruction
         // put nop into the white-list so that instructions like
         // like `nop dword [rax + rax]` does not get caught.
-        match instr.mnemonic().unwrap() {
+        match cs_instr.mnemonic().unwrap() {
             "lea" | "nop" => return None,
 
             _ => (),
@@ -2266,7 +2269,7 @@ impl AsanRuntime {
 
         // This is a TODO! In this case, both the src and the dst are mem operand
         // so we would need to return two operadns?
-        if instr.mnemonic().unwrap().starts_with("rep") {
+        if cs_instr.mnemonic().unwrap().starts_with("rep") {
             return None;
         }
 
@@ -2317,9 +2320,9 @@ impl AsanRuntime {
         basereg: RegId,
         indexreg: RegId,
         scale: i32,
-        disp: i64,
+        disp: isize,
     ) {
-        let redzone_size = i64::from(frida_gum_sys::GUM_RED_ZONE_SIZE);
+        let redzone_size = isize::try_from(frida_gum_sys::GUM_RED_ZONE_SIZE).unwrap();
         let writer = output.writer();
         let true_rip = address;
 
@@ -2365,7 +2368,7 @@ impl AsanRuntime {
                                         | addr  | rip   |
                                         | Rcx   | Rax   |
                                         | Rsi   | Rdx   |
-            Old Rsp - (redsone_size) -> | flags | Rdi   |
+            Old Rsp - (redzone_size) -> | flags | Rdi   |
                                         |       |       |
             Old Rsp                  -> |       |       |
         */
@@ -2416,7 +2419,7 @@ impl AsanRuntime {
                 }
                 X86Register::Rdi => {
                     // In this case rdi is already clobbered, so we want it from the stack (we pushed rdi onto stack before!)
-                    writer.put_mov_reg_reg_offset_ptr(X86Register::Rsi, X86Register::Rsp, -0x28);
+                    writer.put_mov_reg_reg_offset_ptr(X86Register::Rsi, X86Register::Rsp, 0x20);
                 }
                 X86Register::Rsp => {
                     // In this case rsp is also clobbered
@@ -2704,5 +2707,37 @@ impl AsanRuntime {
             16 + i64::from(redzone_size),
             IndexMode::PostAdjust,
         ));
+    }
+}
+
+impl Default for AsanRuntime {
+    fn default() -> Self {
+        Self {
+            check_for_leaks_enabled: false,
+            current_report_impl: 0,
+            allocator: Allocator::default(),
+            regs: [0; ASAN_SAVE_REGISTER_COUNT],
+            blob_report: None,
+            blob_check_mem_byte: None,
+            blob_check_mem_halfword: None,
+            blob_check_mem_dword: None,
+            blob_check_mem_qword: None,
+            blob_check_mem_16bytes: None,
+            blob_check_mem_3bytes: None,
+            blob_check_mem_6bytes: None,
+            blob_check_mem_12bytes: None,
+            blob_check_mem_24bytes: None,
+            blob_check_mem_32bytes: None,
+            blob_check_mem_48bytes: None,
+            blob_check_mem_64bytes: None,
+            stalked_addresses: HashMap::new(),
+            module_map: None,
+            suppressed_addresses: Vec::new(),
+            skip_ranges: Vec::new(),
+            continue_on_error: false,
+            shadow_check_func: None,
+            #[cfg(target_arch = "aarch64")]
+            eh_frame: [0; ASAN_EH_FRAME_DWORD_COUNT],
+        }
     }
 }

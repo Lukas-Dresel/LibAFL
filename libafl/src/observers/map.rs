@@ -9,20 +9,20 @@ use core::{
     hash::{BuildHasher, Hasher},
     iter::Flatten,
     marker::PhantomData,
-    slice::{from_raw_parts, Iter, IterMut},
+    mem::size_of,
+    slice::{self, Iter, IterMut},
 };
 
 use ahash::RandomState;
-use intervaltree::IntervalTree;
+use libafl_bolts::{
+    ownedref::{OwnedMutPtr, OwnedMutSlice},
+    AsIter, AsIterMut, AsMutSlice, AsSlice, HasLen, Named, Truncate,
+};
+use meminterval::IntervalTree;
 use num_traits::Bounded;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bolts::{
-        ownedref::{OwnedMutPtr, OwnedMutSlice},
-        tuples::Named,
-        AsIter, AsIterMut, AsMutSlice, AsSlice, HasLen, Truncate,
-    },
     executors::ExitKind,
     inputs::UsesInput,
     observers::{DifferentialObserver, Observer, ObserversTuple},
@@ -73,9 +73,9 @@ fn init_count_class_16() {
 fn hash_slice<T>(slice: &[T]) -> u64 {
     let mut hasher = RandomState::with_seeds(0, 0, 0, 0).build_hasher();
     let ptr = slice.as_ptr() as *const u8;
-    let map_size = slice.len() / core::mem::size_of::<T>();
+    let map_size = slice.len() / size_of::<T>();
     unsafe {
-        hasher.write(from_raw_parts(ptr, map_size));
+        hasher.write(slice::from_raw_parts(ptr, map_size));
     }
     hasher.finish()
 }
@@ -353,7 +353,7 @@ where
         let cnt = self.usable_count();
         let map = self.as_slice();
         let mut res = 0;
-        for x in map[0..cnt].iter() {
+        for x in &map[0..cnt] {
             if *x != initial {
                 res += 1;
             }
@@ -386,7 +386,7 @@ where
         let initial = self.initial();
         let cnt = self.usable_count();
         let map = self.as_mut_slice();
-        for x in map[0..cnt].iter_mut() {
+        for x in &mut map[0..cnt] {
             *x = initial;
         }
         Ok(())
@@ -815,7 +815,7 @@ where
         let cnt = self.usable_count();
         let map = self.as_slice();
         let mut res = 0;
-        for x in map[0..cnt].iter() {
+        for x in &map[0..cnt] {
             if *x != initial {
                 res += 1;
             }
@@ -838,7 +838,7 @@ where
         let initial = self.initial();
         let cnt = self.usable_count();
         let map = self.as_mut_slice();
-        for x in map[0..cnt].iter_mut() {
+        for x in &mut map[0..cnt] {
             *x = initial;
         }
         Ok(())
@@ -1091,7 +1091,7 @@ where
         let cnt = self.usable_count();
         let map = self.as_slice();
         let mut res = 0;
-        for x in map[0..cnt].iter() {
+        for x in &map[0..cnt] {
             if *x != initial {
                 res += 1;
             }
@@ -1109,7 +1109,7 @@ where
         let initial = self.initial();
         let cnt = self.usable_count();
         let map = self.as_mut_slice();
-        for x in map[0..cnt].iter_mut() {
+        for x in &mut map[0..cnt] {
             *x = initial;
         }
         Ok(())
@@ -1235,7 +1235,23 @@ where
         exit_kind: &ExitKind,
     ) -> Result<(), Error> {
         let map = self.as_mut_slice();
-        let len = map.len();
+        let mut len = map.len();
+        let align_offset = map.as_ptr().align_offset(size_of::<u16>());
+
+        // if len == 1, the next branch will already do this lookup
+        if len > 1 && align_offset != 0 {
+            debug_assert_eq!(
+                align_offset, 1,
+                "Aligning u8 to u16 should always be offset of 1?"
+            );
+            unsafe {
+                *map.get_unchecked_mut(0) =
+                    *COUNT_CLASS_LOOKUP.get_unchecked(*map.get_unchecked(0) as usize);
+            }
+            len -= 1;
+        }
+
+        // Fix the last element
         if (len & 1) != 0 {
             unsafe {
                 *map.get_unchecked_mut(len - 1) =
@@ -1244,13 +1260,17 @@ where
         }
 
         let cnt = len / 2;
-        let map16 = unsafe { core::slice::from_raw_parts_mut(map.as_mut_ptr() as *mut u16, cnt) };
+
+        let map16 = unsafe {
+            slice::from_raw_parts_mut(map.as_mut_ptr().add(align_offset) as *mut u16, cnt)
+        };
         // 2022-07: Adding `enumerate` here increases execution speed/register allocation on x86_64.
         for (_i, item) in map16[0..cnt].iter_mut().enumerate() {
             unsafe {
                 *item = *COUNT_CLASS_LOOKUP_16.get_unchecked(*item as usize);
             }
         }
+
         self.base.post_exec(state, input, exit_kind)
     }
 }
@@ -1740,17 +1760,17 @@ where
 
     #[inline]
     fn get(&self, idx: usize) -> &T {
-        let elem = self.intervals.query_point(idx).next().unwrap();
-        let i = elem.value;
-        let j = idx - elem.range.start;
+        let elem = self.intervals.query(idx..=idx).next().unwrap();
+        let i = *elem.value;
+        let j = idx - elem.interval.start;
         &self.maps[i].as_slice()[j]
     }
 
     #[inline]
     fn get_mut(&mut self, idx: usize) -> &mut T {
-        let elem = self.intervals.query_point(idx).next().unwrap();
-        let i = elem.value;
-        let j = idx - elem.range.start;
+        let elem = self.intervals.query(idx..=idx).next().unwrap();
+        let i = *elem.value;
+        let j = idx - elem.interval.start;
         &mut self.maps[i].as_mut_slice()[j]
     }
 
@@ -1777,9 +1797,9 @@ where
         for map in &self.maps {
             let slice = map.as_slice();
             let ptr = slice.as_ptr() as *const u8;
-            let map_size = slice.len() / core::mem::size_of::<T>();
+            let map_size = slice.len() / size_of::<T>();
             unsafe {
-                hasher.write(from_raw_parts(ptr, map_size));
+                hasher.write(slice::from_raw_parts(ptr, map_size));
             }
         }
         hasher.finish()
@@ -1830,16 +1850,15 @@ where
     #[must_use]
     fn maybe_differential(name: &'static str, maps: Vec<OwnedMutSlice<'a, T>>) -> Self {
         let mut idx = 0;
-        let mut builder = vec![];
+        let mut intervals = IntervalTree::new();
         for (v, x) in maps.iter().enumerate() {
             let l = x.as_slice().len();
-            let r = (idx..(idx + l), v);
+            intervals.insert(idx..(idx + l), v);
             idx += l;
-            builder.push(r);
         }
         Self {
             maps,
-            intervals: builder.into_iter().collect::<IntervalTree<usize, usize>>(),
+            intervals,
             len: idx,
             name: name.to_string(),
             initial: T::default(),
@@ -1874,21 +1893,20 @@ where
     pub fn owned(name: &'static str, maps: Vec<Vec<T>>) -> Self {
         let mut idx = 0;
         let mut v = 0;
-        let mut builder = vec![];
+        let mut intervals = IntervalTree::new();
         let maps: Vec<_> = maps
             .into_iter()
             .map(|x| {
                 let l = x.len();
-                let r = (idx..(idx + l), v);
+                intervals.insert(idx..(idx + l), v);
                 idx += l;
-                builder.push(r);
                 v += 1;
                 OwnedMutSlice::from(x)
             })
             .collect();
         Self {
             maps,
-            intervals: builder.into_iter().collect::<IntervalTree<usize, usize>>(),
+            intervals,
             len: idx,
             name: name.to_string(),
             initial: T::default(),
@@ -2082,7 +2100,7 @@ where
         let cnt = self.usable_count();
         let map = self.as_slice();
         let mut res = 0;
-        for x in map[0..cnt].iter() {
+        for x in &map[0..cnt] {
             if *x != initial {
                 res += 1;
             }
@@ -2111,7 +2129,7 @@ where
         let initial = self.initial();
         let cnt = self.usable_count();
         let map = self.as_mut_slice();
-        for x in map[0..cnt].iter_mut() {
+        for x in &mut map[0..cnt] {
             *x = initial;
         }
         Ok(())

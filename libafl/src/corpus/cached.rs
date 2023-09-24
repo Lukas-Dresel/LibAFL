@@ -1,6 +1,6 @@
 //! The [`CachedOnDiskCorpus`] stores [`Testcase`]s to disk, keeping a subset of them in memory/cache, evicting in a FIFO manner.
 
-use alloc::collections::vec_deque::VecDeque;
+use alloc::{collections::vec_deque::VecDeque, string::String};
 use core::cell::RefCell;
 use std::path::Path;
 
@@ -73,7 +73,7 @@ where
     fn get(&self, idx: CorpusId) -> Result<&RefCell<Testcase<I>>, Error> {
         let testcase = { self.inner.get(idx)? };
         if testcase.borrow().input().is_none() {
-            // let _: &I = testcase.borrow_mut().load_input()?;
+            // self.load_input_into(&mut testcase.borrow_mut())?;
             let mut borrowed_num = 0;
             while self.cached_indexes.borrow().len() >= self.cache_max_len {
                 let removed = self.cached_indexes.borrow_mut().pop_front().unwrap();
@@ -127,6 +127,16 @@ where
     #[inline]
     fn nth(&self, nth: usize) -> CorpusId {
         self.inner.nth(nth)
+    }
+
+    #[inline]
+    fn load_input_into(&self, testcase: &mut Testcase<Self::Input>) -> Result<(), Error> {
+        self.inner.load_input_into(testcase)
+    }
+
+    #[inline]
+    fn store_input_from(&self, testcase: &Testcase<Self::Input>) -> Result<(), Error> {
+        self.inner.store_input_from(testcase)
     }
 }
 
@@ -194,6 +204,31 @@ where
         )
     }
 
+    /// Creates the [`CachedOnDiskCorpus`] specifying the metadata format and the prefix to prepend
+    /// to each testcase.
+    ///
+    /// Will error, if [`std::fs::create_dir_all()`] failed for `dir_path`.
+    pub fn with_meta_format_and_prefix<P>(
+        dir_path: P,
+        cache_max_len: usize,
+        meta_format: Option<OnDiskMetadataFormat>,
+        prefix: Option<String>,
+        locking: bool,
+    ) -> Result<Self, Error>
+    where
+        P: AsRef<Path>,
+    {
+        Self::_new(
+            InMemoryOnDiskCorpus::with_meta_format_and_prefix(
+                dir_path,
+                meta_format,
+                prefix,
+                locking,
+            )?,
+            cache_max_len,
+        )
+    }
+
     /// Internal constructor `fn`
     fn _new(on_disk_corpus: InMemoryOnDiskCorpus<I>, cache_max_len: usize) -> Result<Self, Error> {
         if cache_max_len == 0 {
@@ -206,6 +241,11 @@ where
             cached_indexes: RefCell::new(VecDeque::new()),
             cache_max_len,
         })
+    }
+
+    /// Fetch the inner corpus
+    pub fn inner(&self) -> &InMemoryOnDiskCorpus<I> {
+        &self.inner
     }
 }
 

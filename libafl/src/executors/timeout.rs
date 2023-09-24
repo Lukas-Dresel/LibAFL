@@ -2,7 +2,7 @@
 
 #[cfg(target_os = "linux")]
 use core::ptr::{addr_of, addr_of_mut};
-#[cfg(all(windows, feature = "std"))]
+#[cfg(any(windows, target_os = "linux"))]
 use core::{ffi::c_void, ptr::write_volatile};
 #[cfg(any(windows, unix))]
 use core::{
@@ -17,6 +17,8 @@ use core::{
     sync::atomic::{compiler_fence, Ordering},
 };
 
+#[cfg(target_os = "linux")]
+use libafl_bolts::current_time;
 #[cfg(all(unix, not(target_os = "linux")))]
 use libc::c_int;
 #[cfg(all(windows, feature = "std"))]
@@ -24,15 +26,17 @@ use windows::Win32::{
     Foundation::FILETIME,
     System::Threading::{
         CreateThreadpoolTimer, EnterCriticalSection, InitializeCriticalSection,
-        LeaveCriticalSection, SetThreadpoolTimer, RTL_CRITICAL_SECTION, TP_CALLBACK_ENVIRON_V3,
-        TP_CALLBACK_INSTANCE, TP_TIMER,
+        LeaveCriticalSection, SetThreadpoolTimer, CRITICAL_SECTION, PTP_CALLBACK_INSTANCE,
+        PTP_TIMER, TP_CALLBACK_ENVIRON_V3,
     },
 };
 
 #[cfg(all(windows, feature = "std"))]
-use crate::executors::inprocess::{HasInProcessHandlers, GLOBAL_STATE};
+use crate::executors::inprocess::HasInProcessHandlers;
+#[cfg(any(windows, target_os = "linux"))]
+use crate::executors::inprocess::GLOBAL_STATE;
 use crate::{
-    executors::{Executor, ExitKind, HasObservers},
+    executors::{inprocess::InProcessExecutorHandlerData, Executor, ExitKind, HasObservers},
     observers::UsesObservers,
     state::UsesState,
     Error,
@@ -40,7 +44,7 @@ use crate::{
 
 #[repr(C)]
 #[cfg(all(unix, not(target_os = "linux")))]
-struct Timeval {
+pub(crate) struct Timeval {
     pub tv_sec: i64,
     pub tv_usec: i64,
 }
@@ -62,7 +66,7 @@ impl Debug for Timeval {
 #[repr(C)]
 #[cfg(all(unix, not(target_os = "linux")))]
 #[derive(Debug)]
-struct Itimerval {
+pub(crate) struct Itimerval {
     pub it_interval: Timeval,
     pub it_value: Timeval,
 }
@@ -88,9 +92,27 @@ pub struct TimeoutExecutor<E> {
     #[cfg(windows)]
     milli_sec: i64,
     #[cfg(windows)]
-    tp_timer: *mut TP_TIMER,
+    ptp_timer: PTP_TIMER,
     #[cfg(windows)]
-    critical: RTL_CRITICAL_SECTION,
+    critical: CRITICAL_SECTION,
+
+    exec_tmout: Duration,
+
+    // for batch mode (linux only atm)
+    #[allow(unused)]
+    batch_mode: bool,
+    #[allow(unused)]
+    executions: u32,
+    #[allow(unused)]
+    avg_mul_k: u32,
+    #[allow(unused)]
+    last_signal_time: Duration,
+    #[allow(unused)]
+    avg_exec_time: Duration,
+    #[allow(unused)]
+    start_time: Duration,
+    #[allow(unused)]
+    tmout_start_time: Duration,
 }
 
 impl<E: Debug> Debug for TimeoutExecutor<E> {
@@ -111,7 +133,7 @@ impl<E: Debug> Debug for TimeoutExecutor<E> {
                 &(&self.itimerspec.it_value.tv_sec * 1000
                     + &self.itimerspec.it_value.tv_nsec / 1000 / 1000),
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]
@@ -119,16 +141,16 @@ impl<E: Debug> Debug for TimeoutExecutor<E> {
         f.debug_struct("TimeoutExecutor")
             .field("executor", &self.executor)
             .field("itimerval", &self.itimerval)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 #[cfg(windows)]
 #[allow(non_camel_case_types)]
 type PTP_TIMER_CALLBACK = unsafe extern "system" fn(
-    param0: *mut TP_CALLBACK_INSTANCE,
+    param0: PTP_CALLBACK_INSTANCE,
     param1: *mut c_void,
-    param2: *mut TP_TIMER,
+    param2: PTP_TIMER,
 );
 
 #[cfg(target_os = "linux")]
@@ -158,7 +180,23 @@ impl<E> TimeoutExecutor<E> {
             executor,
             itimerspec,
             timerid,
+            exec_tmout,
+            batch_mode: false,
+            executions: 0,
+            avg_mul_k: 1,
+            last_signal_time: Duration::ZERO,
+            avg_exec_time: Duration::ZERO,
+            start_time: Duration::ZERO,
+            tmout_start_time: Duration::ZERO,
         }
+    }
+
+    /// Create a new [`TimeoutExecutor`], wrapping the given `executor` and checking for timeouts.
+    /// With this method batch mode is enabled.
+    pub fn batch_mode(executor: E, exec_tmout: Duration) -> Self {
+        let mut me = Self::new(executor, exec_tmout);
+        me.batch_mode = true;
+        me
     }
 
     /// Set the timeout for this executor
@@ -177,6 +215,50 @@ impl<E> TimeoutExecutor<E> {
             it_value,
         };
         self.itimerspec = itimerspec;
+        self.exec_tmout = exec_tmout;
+    }
+
+    pub(crate) fn handle_timeout(&mut self, data: &InProcessExecutorHandlerData) -> bool {
+        if !self.batch_mode {
+            return false;
+        }
+        //eprintln!("handle_timeout {:?} {}", self.avg_exec_time, self.avg_mul_k);
+        let cur_time = current_time();
+        if !data.is_valid() {
+            // outside the target
+            unsafe {
+                let disarmed: libc::itimerspec = zeroed();
+                libc::timer_settime(self.timerid, 0, addr_of!(disarmed), null_mut());
+            }
+            let elapsed = cur_time - self.tmout_start_time;
+            // set timer the next exec
+            if self.executions > 0 {
+                self.avg_exec_time = elapsed / self.executions;
+                self.executions = 0;
+            }
+            self.avg_mul_k += 1;
+            self.last_signal_time = cur_time;
+            return true;
+        }
+
+        let elapsed_run = cur_time - self.start_time;
+        if elapsed_run < self.exec_tmout {
+            // fp, reset timeout
+            unsafe {
+                libc::timer_settime(self.timerid, 0, addr_of!(self.itimerspec), null_mut());
+            }
+            if self.executions > 0 {
+                let elapsed = cur_time - self.tmout_start_time;
+                self.avg_exec_time = elapsed / self.executions;
+                self.executions = 0; // It will be 1 when the exec finish
+            }
+            self.tmout_start_time = current_time();
+            self.avg_mul_k += 1;
+            self.last_signal_time = cur_time;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -201,6 +283,14 @@ impl<E> TimeoutExecutor<E> {
         Self {
             executor,
             itimerval,
+            exec_tmout,
+            batch_mode: false,
+            executions: 0,
+            avg_mul_k: 1,
+            last_signal_time: Duration::ZERO,
+            avg_exec_time: Duration::ZERO,
+            start_time: Duration::ZERO,
+            tmout_start_time: Duration::ZERO,
         }
     }
 
@@ -220,6 +310,12 @@ impl<E> TimeoutExecutor<E> {
             it_value,
         };
         self.itimerval = itimerval;
+        self.exec_tmout = exec_tmout;
+    }
+
+    #[allow(clippy::unused_self)]
+    pub(crate) fn handle_timeout(&mut self, _data: &mut InProcessExecutorHandlerData) -> bool {
+        false // TODO
     }
 }
 
@@ -230,14 +326,15 @@ impl<E: HasInProcessHandlers> TimeoutExecutor<E> {
         let milli_sec = exec_tmout.as_millis() as i64;
         let timeout_handler: PTP_TIMER_CALLBACK =
             unsafe { std::mem::transmute(executor.inprocess_handlers().timeout_handler) };
-        let tp_timer = unsafe {
+        let ptp_timer = unsafe {
             CreateThreadpoolTimer(
                 Some(timeout_handler),
                 Some(addr_of_mut!(GLOBAL_STATE) as *mut c_void),
                 Some(&TP_CALLBACK_ENVIRON_V3::default()),
             )
-        };
-        let mut critical = RTL_CRITICAL_SECTION::default();
+        }
+        .expect("CreateThreadpoolTimer failed!");
+        let mut critical = CRITICAL_SECTION::default();
 
         unsafe {
             InitializeCriticalSection(&mut critical);
@@ -246,15 +343,28 @@ impl<E: HasInProcessHandlers> TimeoutExecutor<E> {
         Self {
             executor,
             milli_sec,
-            tp_timer,
+            ptp_timer,
             critical,
+            exec_tmout,
+            batch_mode: false,
+            executions: 0,
+            avg_mul_k: 1,
+            last_signal_time: Duration::ZERO,
+            avg_exec_time: Duration::ZERO,
+            start_time: Duration::ZERO,
+            tmout_start_time: Duration::ZERO,
         }
     }
 
     /// Set the timeout for this executor
-    #[cfg(windows)]
     pub fn set_timeout(&mut self, exec_tmout: Duration) {
         self.milli_sec = exec_tmout.as_millis() as i64;
+        self.exec_tmout = exec_tmout;
+    }
+
+    #[allow(clippy::unused_self)]
+    pub(crate) fn handle_timeout(&mut self, _data: &mut InProcessExecutorHandlerData) -> bool {
+        false // TODO
     }
 
     /// Retrieve the inner `Executor` that is wrapped by this `TimeoutExecutor`.
@@ -280,7 +390,12 @@ where
     ) -> Result<ExitKind, Error> {
         unsafe {
             let data = &mut GLOBAL_STATE;
-            write_volatile(&mut data.tp_timer, self.tp_timer as *mut _ as *mut c_void);
+            write_volatile(
+                &mut data.timeout_executor_ptr,
+                self as *mut _ as *mut c_void,
+            );
+
+            write_volatile(&mut data.ptp_timer, Some(self.ptp_timer));
             write_volatile(
                 &mut data.critical,
                 addr_of_mut!(self.critical) as *mut c_void,
@@ -303,7 +418,7 @@ where
             LeaveCriticalSection(&mut self.critical);
             compiler_fence(Ordering::SeqCst);
 
-            SetThreadpoolTimer(self.tp_timer, Some(&ft), 0, 0);
+            SetThreadpoolTimer(self.ptp_timer, Some(&ft), 0, 0);
 
             let ret = self.executor.run_target(fuzzer, state, mgr, input);
 
@@ -328,7 +443,7 @@ where
     /// Will dereference the given `tp_timer` pointer, unchecked.
     fn post_run_reset(&mut self) {
         unsafe {
-            SetThreadpoolTimer(self.tp_timer, None, 0, 0);
+            SetThreadpoolTimer(self.ptp_timer, None, 0, 0);
         }
         self.executor.post_run_reset();
     }
@@ -349,7 +464,22 @@ where
         input: &Self::Input,
     ) -> Result<ExitKind, Error> {
         unsafe {
-            libc::timer_settime(self.timerid, 0, addr_of_mut!(self.itimerspec), null_mut());
+            if self.batch_mode {
+                let data = &mut GLOBAL_STATE;
+                write_volatile(
+                    &mut data.timeout_executor_ptr,
+                    self as *mut _ as *mut c_void,
+                );
+
+                if self.executions == 0 {
+                    libc::timer_settime(self.timerid, 0, addr_of_mut!(self.itimerspec), null_mut());
+                    self.tmout_start_time = current_time();
+                }
+                self.start_time = current_time();
+            } else {
+                libc::timer_settime(self.timerid, 0, addr_of_mut!(self.itimerspec), null_mut());
+            }
+
             let ret = self.executor.run_target(fuzzer, state, mgr, input);
             // reset timer
             self.post_run_reset();
@@ -358,9 +488,35 @@ where
     }
 
     fn post_run_reset(&mut self) {
-        unsafe {
-            let disarmed: libc::itimerspec = zeroed();
-            libc::timer_settime(self.timerid, 0, addr_of!(disarmed), null_mut());
+        if self.batch_mode {
+            unsafe {
+                let elapsed = current_time() - self.tmout_start_time;
+                // elapsed may be > than tmout in case of received but ingored signal
+                if elapsed > self.exec_tmout
+                    || self.exec_tmout - elapsed < self.avg_exec_time * self.avg_mul_k
+                {
+                    let disarmed: libc::itimerspec = zeroed();
+                    libc::timer_settime(self.timerid, 0, addr_of!(disarmed), null_mut());
+                    // set timer the next exec
+                    if self.executions > 0 {
+                        self.avg_exec_time = elapsed / self.executions;
+                        self.executions = 0;
+                    }
+                    // readjust K
+                    if self.last_signal_time > self.exec_tmout * self.avg_mul_k
+                        && self.avg_mul_k > 1
+                    {
+                        self.avg_mul_k -= 1;
+                    }
+                } else {
+                    self.executions += 1;
+                }
+            }
+        } else {
+            unsafe {
+                let disarmed: libc::itimerspec = zeroed();
+                libc::timer_settime(self.timerid, 0, addr_of!(disarmed), null_mut());
+            }
         }
         self.executor.post_run_reset();
     }

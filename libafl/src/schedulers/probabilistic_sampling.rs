@@ -5,11 +5,11 @@ use alloc::string::String;
 use core::marker::PhantomData;
 
 use hashbrown::HashMap;
+use libafl_bolts::rands::Rand;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bolts::rands::Rand,
-    corpus::{Corpus, CorpusId},
+    corpus::{Corpus, CorpusId, HasTestcase},
     inputs::UsesInput,
     schedulers::{Scheduler, TestcaseScore},
     state::{HasCorpus, HasMetadata, HasRand, UsesState},
@@ -27,6 +27,10 @@ where
 
 /// A state metadata holding a map of probability of corpus elements.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 pub struct ProbabilityMetadata {
     /// corpus index -> probability
     pub map: HashMap<CorpusId, f64>,
@@ -34,7 +38,7 @@ pub struct ProbabilityMetadata {
     pub total_probability: f64,
 }
 
-crate::impl_serdeany!(ProbabilityMetadata);
+libafl_bolts::impl_serdeany!(ProbabilityMetadata);
 
 impl ProbabilityMetadata {
     /// Creates a new [`struct@ProbabilityMetadata`]
@@ -70,7 +74,7 @@ where
     #[allow(clippy::cast_precision_loss)]
     #[allow(clippy::unused_self)]
     pub fn store_probability(&self, state: &mut S, idx: CorpusId) -> Result<(), Error> {
-        let factor = F::compute(&mut *state.corpus().get(idx)?.borrow_mut(), state)?;
+        let factor = F::compute(state, &mut *state.corpus().get(idx)?.borrow_mut())?;
         if factor == 0.0 {
             return Err(Error::illegal_state(
                 "Infinity probability calculated for probabilistic sampling scheduler",
@@ -89,7 +93,7 @@ where
 
 impl<F, S> UsesState for ProbabilitySamplingScheduler<F, S>
 where
-    S: UsesInput,
+    S: UsesInput + HasTestcase,
 {
     type State = S;
 }
@@ -97,7 +101,7 @@ where
 impl<F, S> Scheduler for ProbabilitySamplingScheduler<F, S>
 where
     F: TestcaseScore<S>,
-    S: HasCorpus + HasMetadata + HasRand,
+    S: HasCorpus + HasMetadata + HasRand + HasTestcase,
 {
     fn on_add(&mut self, state: &mut Self::State, idx: CorpusId) -> Result<(), Error> {
         let current_idx = *state.corpus().current();
@@ -124,7 +128,7 @@ where
             let threshold = meta.total_probability * rand_prob;
             let mut k: f64 = 0.0;
             let mut ret = *meta.map.keys().last().unwrap();
-            for (idx, prob) in meta.map.iter() {
+            for (idx, prob) in &meta.map {
                 k += prob;
                 if k >= threshold {
                     ret = *idx;
@@ -134,16 +138,6 @@ where
             self.set_current_scheduled(state, Some(ret))?;
             Ok(ret)
         }
-    }
-
-    /// Set current fuzzed corpus id and `scheduled_count`
-    fn set_current_scheduled(
-        &mut self,
-        state: &mut Self::State,
-        next_idx: Option<CorpusId>,
-    ) -> Result<(), Error> {
-        *state.corpus_mut().current_mut() = next_idx;
-        Ok(())
     }
 }
 
@@ -162,8 +156,9 @@ where
 mod tests {
     use core::{borrow::BorrowMut, marker::PhantomData};
 
+    use libafl_bolts::rands::StdRand;
+
     use crate::{
-        bolts::rands::StdRand,
         corpus::{Corpus, InMemoryCorpus, Testcase},
         feedbacks::ConstFeedback,
         inputs::{bytes::BytesInput, Input, UsesInput},
@@ -186,7 +181,7 @@ mod tests {
     where
         S: HasMetadata + HasCorpus,
     {
-        fn compute(_: &mut Testcase<S::Input>, _state: &S) -> Result<f64, Error> {
+        fn compute(_state: &S, _: &mut Testcase<S::Input>) -> Result<f64, Error> {
             Ok(FACTOR)
         }
     }
@@ -196,6 +191,11 @@ mod tests {
 
     #[test]
     fn test_prob_sampling() {
+        #[cfg(any(not(feature = "serdeany_autoreg"), miri))]
+        unsafe {
+            super::ProbabilityMetadata::register();
+        }
+
         // the first 3 probabilities will be .69, .86, .44
         let rand = StdRand::with_seed(12);
 

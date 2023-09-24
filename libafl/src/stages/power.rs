@@ -7,7 +7,9 @@ use crate::{
     executors::{Executor, HasObservers},
     fuzzer::Evaluator,
     mutators::Mutator,
-    schedulers::{testcase_score::CorpusPowerTestcaseScore, TestcaseScore},
+    schedulers::{
+        ecofuzz::EcoTestcaseScore, testcase_score::CorpusPowerTestcaseScore, TestcaseScore,
+    },
     stages::{mutational::MutatedTransform, MutationalStage, Stage},
     state::{HasClientPerfMonitor, HasCorpus, HasMetadata, HasRand, UsesState},
     Error,
@@ -55,7 +57,7 @@ where
     fn iterations(&self, state: &mut E::State, corpus_idx: CorpusId) -> Result<u64, Error> {
         // Update handicap
         let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
-        let score = F::compute(&mut *testcase, state)? as u64;
+        let score = F::compute(state, &mut *testcase)? as u64;
 
         Ok(score)
     }
@@ -122,3 +124,7 @@ where
 /// The standard powerscheduling stage
 pub type StdPowerMutationalStage<E, EM, I, M, Z> =
     PowerMutationalStage<E, CorpusPowerTestcaseScore<<E as UsesState>::State>, EM, I, M, Z>;
+
+/// Ecofuzz scheduling stage
+pub type EcoPowerMutationalStage<E, EM, I, M, Z> =
+    PowerMutationalStage<E, EcoTestcaseScore<<E as UsesState>::State>, EM, I, M, Z>;

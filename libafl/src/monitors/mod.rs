@@ -21,9 +21,8 @@ use core::{fmt, fmt::Write, time::Duration};
 #[cfg(feature = "std")]
 pub use disk::{OnDiskJSONMonitor, OnDiskTOMLMonitor};
 use hashbrown::HashMap;
+use libafl_bolts::{current_time, format_duration_hms, ClientId};
 use serde::{Deserialize, Serialize};
-
-use crate::bolts::{current_time, format_duration_hms, ClientId};
 
 #[cfg(feature = "afl_exec_sec")]
 const CLIENT_STATS_TIME_WINDOW_SECS: u64 = 5; // 5 seconds
@@ -88,12 +87,16 @@ pub struct ClientStats {
     // monitor (maybe we need a separated struct?)
     /// The corpus size for this client
     pub corpus_size: u64,
+    /// The time for the last update of the corpus size
+    pub last_corpus_time: Duration,
     /// The total executions for this client
     pub executions: u64,
     /// The number of executions of the previous state in case a client decrease the number of execution (e.g when restarting without saving the state)
     pub prev_state_executions: u64,
     /// The size of the objectives corpus for this client
     pub objective_size: u64,
+    /// The time for the last update of the objective size
+    pub last_objective_time: Duration,
     /// The last reported executions for this client
     #[cfg(feature = "afl_exec_sec")]
     pub last_window_executions: u64,
@@ -102,6 +105,8 @@ pub struct ClientStats {
     pub last_execs_per_sec: f64,
     /// The last time we got this information
     pub last_window_time: Duration,
+    /// the start time of the client
+    pub start_time: Duration,
     /// User-defined monitor
     pub user_monitor: HashMap<String, UserStats>,
     /// Client performance statistics
@@ -141,6 +146,7 @@ impl ClientStats {
     /// We got a new information about corpus size for this client, insert them.
     pub fn update_corpus_size(&mut self, corpus_size: u64) {
         self.corpus_size = corpus_size;
+        self.last_corpus_time = current_time();
     }
 
     /// We got a new information about objective corpus size for this client, insert them.
@@ -207,8 +213,9 @@ impl ClientStats {
         self.user_monitor.insert(name, value);
     }
 
+    #[must_use]
     /// Get a user-defined stat using the name
-    pub fn get_user_stats(&mut self, name: &str) -> Option<&UserStats> {
+    pub fn get_user_stats(&self, name: &str) -> Option<&UserStats> {
         self.user_monitor.get(name)
     }
 
@@ -276,6 +283,7 @@ pub trait Monitor {
         for _ in client_stat_count..(client_id.0 + 1) as usize {
             self.client_stats_mut().push(ClientStats {
                 last_window_time: current_time(),
+                start_time: current_time(),
                 ..ClientStats::default()
             });
         }
@@ -372,8 +380,14 @@ impl Monitor for SimplePrintingMonitor {
     }
 
     fn display(&mut self, event_msg: String, sender_id: ClientId) {
+        let mut userstats = self.client_stats()[sender_id.0 as usize]
+            .user_monitor
+            .iter()
+            .map(|(key, value)| format!("{key}: {value}"))
+            .collect::<Vec<_>>();
+        userstats.sort();
         println!(
-            "[{} #{}] run time: {}, clients: {}, corpus: {}, objectives: {}, executions: {}, exec/sec: {}",
+            "[{} #{}] run time: {}, clients: {}, corpus: {}, objectives: {}, executions: {}, exec/sec: {}, {}",
             event_msg,
             sender_id.0,
             format_duration_hms(&(current_time() - self.start_time)),
@@ -381,7 +395,8 @@ impl Monitor for SimplePrintingMonitor {
             self.corpus_size(),
             self.objective_size(),
             self.total_execs(),
-            self.execs_per_sec_pretty()
+            self.execs_per_sec_pretty(),
+            userstats.join(", ")
         );
 
         // Only print perf monitor if the feature is enabled
@@ -418,7 +433,7 @@ where
         f.debug_struct("SimpleMonitor")
             .field("start_time", &self.start_time)
             .field("client_stats", &self.client_stats)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -670,7 +685,7 @@ impl ClientPerfMonitor {
     /// the current clock counter
     #[must_use]
     pub fn new() -> Self {
-        let start_time = crate::bolts::cpu::read_time_counter();
+        let start_time = libafl_bolts::cpu::read_time_counter();
 
         Self {
             start_time,
@@ -694,7 +709,7 @@ impl ClientPerfMonitor {
     /// Start a timer with the current time counter
     #[inline]
     pub fn start_timer(&mut self) {
-        self.timer_start = Some(crate::bolts::cpu::read_time_counter());
+        self.timer_start = Some(libafl_bolts::cpu::read_time_counter());
     }
 
     /// Update the current [`ClientPerfMonitor`] with the given [`ClientPerfMonitor`]
@@ -720,7 +735,7 @@ impl ClientPerfMonitor {
             }
             Some(timer_start) => {
                 // Calculate the elapsed time
-                let elapsed = crate::bolts::cpu::read_time_counter() - timer_start;
+                let elapsed = libafl_bolts::cpu::read_time_counter() - timer_start;
 
                 // Reset the timer
                 self.timer_start = None;
@@ -973,13 +988,11 @@ pub mod pybind {
     use alloc::{boxed::Box, string::String, vec::Vec};
     use core::time::Duration;
 
+    use libafl_bolts::ClientId;
     use pyo3::{prelude::*, types::PyUnicode};
 
     use super::ClientStats;
-    use crate::{
-        bolts::ClientId,
-        monitors::{Monitor, SimpleMonitor},
-    };
+    use crate::monitors::{Monitor, SimpleMonitor};
 
     // TODO create a PyObjectFnMut to pass, track stabilization of https://github.com/rust-lang/rust/issues/29625
 
@@ -995,7 +1008,7 @@ pub mod pybind {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("PythonSimpleMonitor")
                 .field("print_fn", &self.print_fn)
-                .finish()
+                .finish_non_exhaustive()
         }
     }
 
@@ -1060,13 +1073,15 @@ pub mod pybind {
 
     macro_rules! unwrap_me {
         ($wrapper:expr, $name:ident, $body:block) => {
-            crate::unwrap_me_body!($wrapper, $name, $body, PythonMonitorWrapper, { Simple })
+            libafl_bolts::unwrap_me_body!($wrapper, $name, $body, PythonMonitorWrapper, { Simple })
         };
     }
 
     macro_rules! unwrap_me_mut {
         ($wrapper:expr, $name:ident, $body:block) => {
-            crate::unwrap_me_mut_body!($wrapper, $name, $body, PythonMonitorWrapper, { Simple })
+            libafl_bolts::unwrap_me_mut_body!($wrapper, $name, $body, PythonMonitorWrapper, {
+                Simple
+            })
         };
     }
 

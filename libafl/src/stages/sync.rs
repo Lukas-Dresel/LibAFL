@@ -7,10 +7,10 @@ use std::{
     time::SystemTime,
 };
 
+use libafl_bolts::{current_time, shmem::ShMemProvider};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bolts::{current_time, shmem::ShMemProvider},
     corpus::{Corpus, CorpusId, HasTestcase},
     events::{llmp::LlmpEventConverter, Event, EventConfig, EventFirer},
     executors::{Executor, ExitKind, HasObservers},
@@ -22,13 +22,17 @@ use crate::{
 };
 
 /// Metadata used to store information about disk sync time
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SyncFromDiskMetadata {
     /// The last time the sync was done
     pub last_time: SystemTime,
 }
 
-crate::impl_serdeany!(SyncFromDiskMetadata);
+libafl_bolts::impl_serdeany!(SyncFromDiskMetadata);
 
 impl SyncFromDiskMetadata {
     /// Create a new [`struct@SyncFromDiskMetadata`]
@@ -191,13 +195,17 @@ where
 }
 
 /// Metadata used to store information about the last sent testcase with `SyncFromBrokerStage`
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SyncFromBrokerMetadata {
     /// The `CorpusId` of the last sent testcase
     pub last_id: Option<CorpusId>,
 }
 
-crate::impl_serdeany!(SyncFromBrokerMetadata);
+libafl_bolts::impl_serdeany!(SyncFromBrokerMetadata);
 
 impl SyncFromBrokerMetadata {
     /// Create a new [`struct@SyncFromBrokerMetadata`]
@@ -268,7 +276,7 @@ where
                 last_id.map_or_else(|| state.corpus().first(), |id| state.corpus().next(id));
 
             while let Some(id) = cur_id {
-                let input = state.testcase_mut(id)?.load_input()?.clone();
+                let input = state.corpus().cloned_input_for_id(id)?;
 
                 self.client.fire(
                     state,
@@ -280,6 +288,7 @@ where
                         client_config: EventConfig::AlwaysUnique,
                         time: current_time(),
                         executions: 0,
+                        forward_id: None,
                     },
                 )?;
 

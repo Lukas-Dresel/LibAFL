@@ -1,8 +1,20 @@
-//! Eventmanager manages all events that go to other instances of the fuzzer.
+//! An [`EventManager`] manages all events that go to other instances of the fuzzer.
+//! The messages are commonly information about new Testcases as well as stats and other [`Event`]s.
 
 pub mod simple;
 pub use simple::*;
+#[cfg(all(unix, feature = "std"))]
+pub mod centralized;
+#[cfg(all(unix, feature = "std"))]
+pub use centralized::*;
+#[cfg(feature = "std")]
+#[allow(clippy::ignored_unit_patterns)]
+pub mod launcher;
+#[allow(clippy::ignored_unit_patterns)]
 pub mod llmp;
+#[cfg(feature = "tcp_manager")]
+#[allow(clippy::ignored_unit_patterns)]
+pub mod tcp;
 use alloc::{boxed::Box, string::String, vec::Vec};
 #[cfg(all(unix, feature = "std"))]
 use core::ffi::c_void;
@@ -14,22 +26,24 @@ use core::{
 };
 
 use ahash::RandomState;
+#[cfg(feature = "std")]
+pub use launcher::*;
+#[cfg(all(unix, feature = "std"))]
+use libafl_bolts::os::unix_signals::{siginfo_t, ucontext_t, Handler, Signal};
+use libafl_bolts::{current_time, ClientId};
+#[cfg(all(unix, feature = "std"))]
+use libafl_bolts::{shmem::ShMemProvider, staterestore::StateRestorer};
 pub use llmp::*;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "std")]
 use uuid::Uuid;
 
-#[cfg(all(unix, feature = "std"))]
-use crate::bolts::os::unix_signals::{siginfo_t, ucontext_t, Handler, Signal};
-#[cfg(all(unix, feature = "std"))]
-use crate::bolts::{shmem::ShMemProvider, staterestore::StateRestorer};
 use crate::{
-    bolts::current_time,
     executors::ExitKind,
     inputs::Input,
     monitors::UserStats,
     observers::ObserversTuple,
-    state::{HasClientPerfMonitor, HasExecutions, HasMetadata},
+    state::{HasClientPerfMonitor, HasExecutions, HasLastReportTime, HasMetadata},
     Error,
 };
 
@@ -67,7 +81,7 @@ pub unsafe fn shutdown_handler<SP>(
     signal: Signal,
     _info: siginfo_t,
     _context: &mut ucontext_t,
-    data: &mut ShutdownSignalData,
+    data: &ShutdownSignalData,
 ) where
     SP: ShMemProvider,
 {
@@ -108,7 +122,7 @@ impl Handler for ShutdownSignalData {
 }
 
 /// A per-fuzzer unique `ID`, usually starting with `0` and increasing
-/// by `1` in multiprocessed `EventManager`s, such as [`self::llmp::LlmpEventManager`].
+/// by `1` in multiprocessed [`EventManager`]s, such as [`self::llmp::LlmpEventManager`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct EventManagerId(
@@ -207,7 +221,7 @@ impl EventConfig {
     #[must_use]
     pub fn from_build_id() -> Self {
         EventConfig::BuildID {
-            id: crate::bolts::build_id::get(),
+            id: libafl_bolts::build_id::get(),
         }
     }
 
@@ -261,6 +275,7 @@ where
 }
 */
 
+// TODO remove forward_id as not anymore needed for centralized
 /// Events sent around in the library
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(bound = "I: serde::de::DeserializeOwned")]
@@ -286,6 +301,8 @@ where
         time: Duration,
         /// The executions of this client
         executions: usize,
+        /// The original sender if, if forwarded
+        forward_id: Option<ClientId>,
     },
     /// New stats event to monitor.
     UpdateExecStats {
@@ -360,6 +377,7 @@ where
                 observers_buf: _,
                 time: _,
                 executions: _,
+                forward_id: _,
             } => "Testcase",
             Event::UpdateExecStats {
                 time: _,
@@ -427,11 +445,11 @@ pub trait EventFirer: UsesState {
     }
 
     /// Serialize all observers for this type and manager
-    fn serialize_observers<OT>(&mut self, observers: &OT) -> Result<Vec<u8>, Error>
+    fn serialize_observers<OT>(&mut self, observers: &OT) -> Result<Option<Vec<u8>>, Error>
     where
         OT: ObserversTuple<Self::State> + Serialize,
     {
-        Ok(postcard::to_allocvec(observers)?)
+        Ok(Some(postcard::to_allocvec(observers)?))
     }
 
     /// Get the configuration
@@ -443,7 +461,7 @@ pub trait EventFirer: UsesState {
 /// [`ProgressReporter`] report progress to the broker.
 pub trait ProgressReporter: EventFirer
 where
-    Self::State: HasClientPerfMonitor + HasMetadata + HasExecutions,
+    Self::State: HasClientPerfMonitor + HasMetadata + HasExecutions + HasLastReportTime,
 {
     /// Given the last time, if `monitor_timeout` seconds passed, send off an info/monitor/heartbeat message to the broker.
     /// Returns the new `last` time (so the old one, unless `monitor_timeout` time has passed and monitor have been sent)
@@ -451,49 +469,62 @@ where
     fn maybe_report_progress(
         &mut self,
         state: &mut Self::State,
-        last_report_time: Duration,
         monitor_timeout: Duration,
-    ) -> Result<Duration, Error> {
-        let executions = *state.executions();
+    ) -> Result<(), Error> {
+        let Some(last_report_time) = state.last_report_time() else {
+            // this is the first time we execute, no need to report progress just yet.
+            *state.last_report_time_mut() = Some(current_time());
+            return Ok(());
+        };
         let cur = current_time();
         // default to 0 here to avoid crashes on clock skew
-        if cur.checked_sub(last_report_time).unwrap_or_default() > monitor_timeout {
-            // Default no introspection implmentation
-            #[cfg(not(feature = "introspection"))]
+        if cur.checked_sub(*last_report_time).unwrap_or_default() > monitor_timeout {
+            // report_progress sets a new `last_report_time` internally.
+            self.report_progress(state)?;
+        }
+        Ok(())
+    }
+
+    /// Send off an info/monitor/heartbeat message to the broker.
+    /// Will return an [`crate::Error`], if the stats could not be sent.
+    fn report_progress(&mut self, state: &mut Self::State) -> Result<(), Error> {
+        let executions = *state.executions();
+        let cur = current_time();
+
+        // Default no introspection implmentation
+        #[cfg(not(feature = "introspection"))]
+        self.fire(
+            state,
+            Event::UpdateExecStats {
+                executions,
+                time: cur,
+                phantom: PhantomData,
+            },
+        )?;
+
+        // If performance monitor are requested, fire the `UpdatePerfMonitor` event
+        #[cfg(feature = "introspection")]
+        {
+            state
+                .introspection_monitor_mut()
+                .set_current_time(libafl_bolts::cpu::read_time_counter());
+
+            // Send the current monitor over to the manager. This `.clone` shouldn't be
+            // costly as `ClientPerfMonitor` impls `Copy` since it only contains `u64`s
             self.fire(
                 state,
-                Event::UpdateExecStats {
+                Event::UpdatePerfMonitor {
                     executions,
                     time: cur,
+                    introspection_monitor: Box::new(state.introspection_monitor().clone()),
                     phantom: PhantomData,
                 },
             )?;
-
-            // If performance monitor are requested, fire the `UpdatePerfMonitor` event
-            #[cfg(feature = "introspection")]
-            {
-                state
-                    .introspection_monitor_mut()
-                    .set_current_time(crate::bolts::cpu::read_time_counter());
-
-                // Send the current monitor over to the manager. This `.clone` shouldn't be
-                // costly as `ClientPerfMonitor` impls `Copy` since it only contains `u64`s
-                self.fire(
-                    state,
-                    Event::UpdatePerfMonitor {
-                        executions,
-                        time: cur,
-                        introspection_monitor: Box::new(state.introspection_monitor().clone()),
-                        phantom: PhantomData,
-                    },
-                )?;
-            }
-
-            Ok(cur)
-        } else {
-            if cur.as_millis() % 1000 == 0 {}
-            Ok(last_report_time)
         }
+
+        *state.last_report_time_mut() = Some(cur);
+
+        Ok(())
     }
 }
 
@@ -502,6 +533,7 @@ pub trait EventRestarter: UsesState {
     /// For restarting event managers, implement a way to forward state to their next peers.
     #[inline]
     fn on_restart(&mut self, _state: &mut Self::State) -> Result<(), Error> {
+        self.await_restart_safe();
         Ok(())
     }
 
@@ -511,7 +543,7 @@ pub trait EventRestarter: UsesState {
         Ok(())
     }
 
-    /// Block until we are safe to exit.
+    /// Block until we are safe to exit, usually called inside `on_restart`.
     #[inline]
     fn await_restart_safe(&mut self) {}
 }
@@ -541,7 +573,7 @@ pub trait HasEventManagerId {
 pub trait EventManager<E, Z>:
     EventFirer + EventProcessor<E, Z> + EventRestarter + HasEventManagerId + ProgressReporter
 where
-    Self::State: HasClientPerfMonitor + HasMetadata + HasExecutions,
+    Self::State: HasClientPerfMonitor + HasMetadata + HasExecutions + HasLastReportTime,
 {
 }
 
@@ -608,7 +640,7 @@ where
 }
 
 impl<E, S, Z> EventManager<E, Z> for NopEventManager<S> where
-    S: UsesInput + HasClientPerfMonitor + HasExecutions + HasMetadata
+    S: UsesInput + HasClientPerfMonitor + HasExecutions + HasLastReportTime + HasMetadata
 {
 }
 
@@ -626,7 +658,7 @@ where
 }
 
 impl<S> ProgressReporter for NopEventManager<S> where
-    S: UsesInput + HasClientPerfMonitor + HasExecutions + HasMetadata
+    S: UsesInput + HasClientPerfMonitor + HasExecutions + HasLastReportTime + HasMetadata
 {
 }
 
@@ -639,13 +671,10 @@ impl<S> HasEventManagerId for NopEventManager<S> {
 #[cfg(test)]
 mod tests {
 
+    use libafl_bolts::{current_time, tuples::tuple_list, Named};
     use tuple_list::tuple_list_type;
 
     use crate::{
-        bolts::{
-            current_time,
-            tuples::{tuple_list, Named},
-        },
         events::{Event, EventConfig},
         executors::ExitKind,
         inputs::bytes::BytesInput,
@@ -669,6 +698,7 @@ mod tests {
             client_config: EventConfig::AlwaysUnique,
             time: current_time(),
             executions: 0,
+            forward_id: None,
         };
 
         let serialized = postcard::to_allocvec(&e).unwrap();
@@ -683,6 +713,7 @@ mod tests {
                 client_config: _,
                 time: _,
                 executions: _,
+                forward_id: _,
             } => {
                 let o: tuple_list_type!(StdMapObserver::<u32, false>) =
                     postcard::from_bytes(observers_buf.as_ref().unwrap()).unwrap();
@@ -725,7 +756,7 @@ pub mod pybind {
 
     macro_rules! unwrap_me {
         ($wrapper:expr, $name:ident, $body:block) => {
-            crate::unwrap_me_body!($wrapper, $name, $body, PythonEventManagerWrapper, {
+            libafl_bolts::unwrap_me_body!($wrapper, $name, $body, PythonEventManagerWrapper, {
                 Simple
             })
         };
@@ -733,7 +764,7 @@ pub mod pybind {
 
     macro_rules! unwrap_me_mut {
         ($wrapper:expr, $name:ident, $body:block) => {
-            crate::unwrap_me_mut_body!($wrapper, $name, $body, PythonEventManagerWrapper, {
+            libafl_bolts::unwrap_me_mut_body!($wrapper, $name, $body, PythonEventManagerWrapper, {
                 Simple
             })
         };

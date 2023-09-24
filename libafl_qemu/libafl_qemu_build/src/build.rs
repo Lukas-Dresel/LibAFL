@@ -8,7 +8,7 @@ use which::which;
 
 const QEMU_URL: &str = "https://github.com/AFLplusplus/qemu-libafl-bridge";
 const QEMU_DIRNAME: &str = "qemu-libafl-bridge";
-const QEMU_REVISION: &str = "0dc52ed6f3915f727aaec8648706760f278f0571";
+const QEMU_REVISION: &str = "ff5bc3d934044a5a5466759525f0371ccf86152e";
 
 fn build_dep_check(tools: &[&str]) {
     for tool in tools {
@@ -16,7 +16,7 @@ fn build_dep_check(tools: &[&str]) {
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
 #[must_use]
 pub fn build(
     cpu_target: &str,
@@ -59,6 +59,9 @@ pub fn build(
     target_dir.pop();
 
     build_dep_check(&["git", "make"]);
+
+    let cc_compiler = cc::Build::new().cpp(false).get_compiler();
+    let cpp_compiler = cc::Build::new().cpp(true).get_compiler();
 
     let qemu_path = if let Some(qemu_dir) = custum_qemu_dir.as_ref() {
         Path::new(&qemu_dir).to_path_buf()
@@ -136,9 +139,25 @@ pub fn build(
             let mut cmd = Command::new("./configure");
             cmd.current_dir(&qemu_path)
                 //.arg("--as-static-lib")
+                .env("__LIBAFL_QEMU_BUILD_OUT", build_dir.join("linkinfo.json"))
+                .env("__LIBAFL_QEMU_BUILD_CC", cc_compiler.path())
+                .env("__LIBAFL_QEMU_BUILD_CXX", cpp_compiler.path())
+                .arg(&format!(
+                    "--cc={}",
+                    qemu_path.join("linker_interceptor.py").display()
+                ))
+                .arg(&format!(
+                    "--cxx={}",
+                    qemu_path.join("linker_interceptor++.py").display()
+                ))
                 .arg("--as-shared-lib")
                 .arg(&format!("--target-list={cpu_target}-{target_suffix}"))
-                .args(["--disable-bsd-user", "--disable-fdt", "--disable-system"]);
+                .args([
+                    "--disable-bsd-user",
+                    "--disable-fdt",
+                    "--disable-system",
+                    "--disable-capstone",
+                ]);
             if cfg!(feature = "debug_assertions") {
                 cmd.arg("--enable-debug");
             }
@@ -147,6 +166,17 @@ pub fn build(
             let mut cmd = Command::new("./configure");
             cmd.current_dir(&qemu_path)
                 //.arg("--as-static-lib")
+                .env("__LIBAFL_QEMU_BUILD_OUT", build_dir.join("linkinfo.json"))
+                .env("__LIBAFL_QEMU_BUILD_CC", cc_compiler.path())
+                .env("__LIBAFL_QEMU_BUILD_CXX", cpp_compiler.path())
+                .arg(&format!(
+                    "--cc={}",
+                    qemu_path.join("linker_interceptor.py").display()
+                ))
+                .arg(&format!(
+                    "--cxx={}",
+                    qemu_path.join("linker_interceptor++.py").display()
+                ))
                 .arg("--as-shared-lib")
                 .arg(&format!("--target-list={cpu_target}-{target_suffix}"))
                 .arg(if cfg!(feature = "slirp") {
@@ -165,6 +195,7 @@ pub fn build(
                 .arg("--disable-brlapi")
                 .arg("--disable-bsd-user")
                 .arg("--disable-bzip2")
+                .arg("--disable-capstone")
                 .arg("--disable-cap-ng")
                 .arg("--disable-canokey")
                 .arg("--disable-cloop")
@@ -231,6 +262,7 @@ pub fn build(
                 .arg("--disable-slirp-smbd")
                 .arg("--disable-smartcard")
                 .arg("--disable-snappy")
+                .arg("--disable-sndio")
                 .arg("--disable-sparse")
                 .arg("--disable-spice")
                 .arg("--disable-spice-protocol")
@@ -259,9 +291,7 @@ pub fn build(
                 .arg("--disable-xen")
                 .arg("--disable-xen-pci-passthrough")
                 .arg("--disable-xkbcommon")
-                .arg("--disable-zstd")
-                .arg("--disable-capstone")
-                .arg("--disable-sndio");
+                .arg("--disable-zstd");
             if cfg!(feature = "debug_assertions") {
                 cmd.arg("--enable-debug");
             }
@@ -272,6 +302,7 @@ pub fn build(
                 .current_dir(&build_dir)
                 .arg("-j")
                 .arg(&format!("{j}"))
+                .env("V", "1")
                 .status()
                 .expect("Make failed");
         } else {
@@ -283,6 +314,7 @@ pub fn build(
         }
     }
 
+    /*
     let mut objects = vec![];
     for dir in &[
         build_dir.join("libcommon.fa.p"),
@@ -303,7 +335,33 @@ pub fn build(
             }
         }
     }
+    */
 
+    let compile_commands_string =
+        &fs::read_to_string(build_dir.join("linkinfo.json")).expect("Failed to read linkinfo.json");
+
+    let linkinfo = json::parse(compile_commands_string).expect("Failed to parse linkinfo.json");
+
+    let mut cmd = vec![];
+    for arg in linkinfo["cmd"].members() {
+        cmd.push(
+            arg.as_str()
+                .expect("linkinfo.json `cmd` values must be strings"),
+        );
+    }
+
+    assert!(cpp_compiler
+        .to_command()
+        .current_dir(&build_dir)
+        .arg("-o")
+        .arg("libqemu-partially-linked.o")
+        .arg("-r")
+        .args(cmd)
+        .status()
+        .expect("Partial linked failure")
+        .success());
+
+    /* // Old manual linking, kept here for reference and debugging
     if is_usermode {
         Command::new("ld")
             .current_dir(out_dir_path)
@@ -316,10 +374,12 @@ pub fn build(
             .arg(format!("{}/libhwcore.fa", build_dir.display()))
             .arg(format!("{}/libqom.fa", build_dir.display()))
             .arg(format!("{}/libevent-loop-base.a", build_dir.display()))
+            .arg(format!("{}/gdbstub/libgdb_user.fa", build_dir.display()))
             .arg("--no-whole-archive")
             .arg(format!("{}/libqemuutil.a", build_dir.display()))
             .arg(format!("{}/libhwcore.fa", build_dir.display()))
             .arg(format!("{}/libqom.fa", build_dir.display()))
+            .arg(format!("{}/gdbstub/libgdb_user.fa", build_dir.display()))
             .arg(format!(
                 "--dynamic-list={}/plugins/qemu-plugins.symbols",
                 qemu_path.display()
@@ -339,6 +399,7 @@ pub fn build(
             .arg(format!("{}/libhwcore.fa", build_dir.display()))
             .arg(format!("{}/libqom.fa", build_dir.display()))
             .arg(format!("{}/libevent-loop-base.a", build_dir.display()))
+            .arg(format!("{}/gdbstub/libgdb_softmmu.fa", build_dir.display()))
             .arg(format!("{}/libio.fa", build_dir.display()))
             .arg(format!("{}/libcrypto.fa", build_dir.display()))
             .arg(format!("{}/libauthz.fa", build_dir.display()))
@@ -348,6 +409,10 @@ pub fn build(
             .arg(format!("{}/libqmp.fa", build_dir.display()))
             .arg("--no-whole-archive")
             .arg(format!("{}/libqemuutil.a", build_dir.display()))
+            .arg(format!(
+                "{}/subprojects/dtc/libfdt/libfdt.a",
+                build_dir.display()
+            ))
             .arg(format!(
                 "{}/subprojects/libvhost-user/libvhost-user-glib.a",
                 build_dir.display()
@@ -360,10 +425,10 @@ pub fn build(
                 "{}/subprojects/libvduse/libvduse.a",
                 build_dir.display()
             ))
-            .arg(format!("{}/libfdt.a", build_dir.display()))
             .arg(format!("{}/libmigration.fa", build_dir.display()))
             .arg(format!("{}/libhwcore.fa", build_dir.display()))
             .arg(format!("{}/libqom.fa", build_dir.display()))
+            .arg(format!("{}/gdbstub/libgdb_softmmu.fa", build_dir.display()))
             .arg(format!("{}/libio.fa", build_dir.display()))
             .arg(format!("{}/libcrypto.fa", build_dir.display()))
             .arg(format!("{}/libauthz.fa", build_dir.display()))
@@ -378,18 +443,34 @@ pub fn build(
             .arg("--end-group")
             .status()
             .expect("Partial linked failure");
-    }
+    }*/
 
     Command::new("ar")
         .current_dir(out_dir_path)
         .arg("crs")
         .arg("libqemu-partially-linked.a")
-        .arg("libqemu-partially-linked.o")
+        .arg(build_dir.join("libqemu-partially-linked.o"))
         .status()
         .expect("Ar creation");
 
     println!("cargo:rustc-link-search=native={out_dir}");
     println!("cargo:rustc-link-lib=static=qemu-partially-linked");
+
+    for arg in linkinfo["search"].members() {
+        let val = arg
+            .as_str()
+            .expect("linkinfo.json `search` values must be strings");
+        println!("cargo:rustc-link-search={val}");
+    }
+
+    for arg in linkinfo["libs"].members() {
+        let val = arg
+            .as_str()
+            .expect("linkinfo.json `libs` values must be strings");
+        println!("cargo:rustc-link-lib={val}");
+    }
+
+    /*
     println!("cargo:rustc-link-lib=rt");
     println!("cargo:rustc-link-lib=gmodule-2.0");
     println!("cargo:rustc-link-lib=glib-2.0");
@@ -399,12 +480,13 @@ pub fn build(
     // therefore, we need to link with keyutils if our system have libkeyutils.
     let _: Result<pkg_config::Library, pkg_config::Error> =
         pkg_config::Config::new().probe("libkeyutils");
+    */
 
     if !is_usermode {
-        println!("cargo:rustc-link-lib=pixman-1");
-        if env::var("LINK_SLIRP").is_ok() || cfg!(feature = "slirp") {
-            println!("cargo:rustc-link-lib=slirp");
-        }
+        //println!("cargo:rustc-link-lib=pixman-1");
+        //if env::var("LINK_SLIRP").is_ok() || cfg!(feature = "slirp") {
+        //    println!("cargo:rustc-link-lib=slirp");
+        //}
 
         fs::create_dir_all(target_dir.join("pc-bios")).unwrap();
         for path in fs::read_dir(build_dir.join("pc-bios")).unwrap() {

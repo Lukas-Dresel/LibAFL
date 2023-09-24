@@ -19,14 +19,19 @@ extern "C" {
     pub fn __libafl_targets_cmplog_instructions(k: u64, shape: u8, arg1: u64, arg2: u64);
 }
 
+use std::rc::Rc;
+
+use frida_gum::ModuleMap;
 #[cfg(target_arch = "aarch64")]
 use frida_gum::{
     instruction_writer::{Aarch64Register, IndexMode, InstructionWriter},
     stalker::StalkerOutput,
 };
+#[cfg(target_arch = "aarch64")]
+use frida_gum_sys::Insn;
 
 #[cfg(all(feature = "cmplog", target_arch = "aarch64"))]
-use crate::utils::{instruction_width, writer_register};
+use crate::utils::{frida_to_cs, instruction_width, writer_register};
 
 #[cfg(all(feature = "cmplog", target_arch = "aarch64"))]
 /// Speciial `CmpLog` Cases for `aarch64`
@@ -41,7 +46,7 @@ pub enum SpecialCmpLogCase {
 #[cfg(target_arch = "aarch64")]
 use capstone::{
     arch::{arm64::Arm64OperandType, ArchOperand::Arm64Operand},
-    Capstone, Insn,
+    Capstone,
 };
 
 /// The [`frida_gum_sys::GUM_RED_ZONE_SIZE`] casted to [`i32`]
@@ -88,7 +93,7 @@ impl FridaRuntime for CmpLogRuntime {
         &mut self,
         _gum: &frida_gum::Gum,
         _ranges: &RangeMap<usize, (u16, String)>,
-        _modules_to_instrument: &[&str],
+        _module_map: &Rc<ModuleMap>,
     ) {
         self.generate_instrumentation_blobs();
     }
@@ -599,14 +604,18 @@ impl CmpLogRuntime {
         CmplogOperandType,
         Option<SpecialCmpLogCase>,
     )> {
+        // We need to re-decode frida-internal capstone values to upstream capstone
+        let cs_instr = frida_to_cs(capstone, instr);
+        let cs_instr = cs_instr.first().unwrap();
+
         // We only care for compare instructions - aka instructions which set the flags
-        match instr.mnemonic().unwrap() {
+        match cs_instr.mnemonic().unwrap() {
             "cmp" | "ands" | "subs" | "adds" | "negs" | "ngcs" | "sbcs" | "bics" | "cbz"
             | "cbnz" | "tbz" | "tbnz" | "adcs" => (),
             _ => return None,
         }
         let mut operands = capstone
-            .insn_detail(instr)
+            .insn_detail(cs_instr)
             .unwrap()
             .arch_detail()
             .operands();
@@ -615,20 +624,21 @@ impl CmpLogRuntime {
         let special_case = [
             "cbz", "cbnz", "tbz", "tbnz", "subs", "adds", "ands", "sbcs", "bics", "adcs",
         ]
-        .contains(&instr.mnemonic().unwrap());
+        .contains(&cs_instr.mnemonic().unwrap());
         if operands.len() != 2 && !special_case {
             return None;
         }
 
         // handle special opcodes case which have 3 operands, but the 1st(dest) is not important to us
-        if ["subs", "adds", "ands", "sbcs", "bics", "adcs"].contains(&instr.mnemonic().unwrap()) {
+        if ["subs", "adds", "ands", "sbcs", "bics", "adcs"].contains(&cs_instr.mnemonic().unwrap())
+        {
             //remove the dest operand from the list
             operands.remove(0);
         }
 
         // cbz marked as special since there is only 1 operand
         #[allow(clippy::cast_sign_loss)]
-        let special_case = matches!(instr.mnemonic().unwrap(), "cbz" | "cbnz");
+        let special_case = matches!(cs_instr.mnemonic().unwrap(), "cbz" | "cbnz");
 
         #[allow(clippy::cast_sign_loss, clippy::similar_names)]
         let operand1 = if let Arm64Operand(arm64operand) = operands.first().unwrap() {
@@ -639,7 +649,7 @@ impl CmpLogRuntime {
                     opmem.base(),
                     opmem.index(),
                     opmem.disp(),
-                    instruction_width(instr, &operands),
+                    instruction_width(cs_instr, &operands),
                 )),
                 Arm64OperandType::Cimm(val) => Some(CmplogOperandType::Cimm(val as u64)),
                 _ => return None,
@@ -659,7 +669,7 @@ impl CmpLogRuntime {
                     opmem.base(),
                     opmem.index(),
                     opmem.disp(),
-                    instruction_width(instr, &operands),
+                    instruction_width(cs_instr, &operands),
                 )),
                 Arm64OperandType::Cimm(val) => Some(CmplogOperandType::Cimm(val as u64)),
                 _ => return None,
@@ -669,7 +679,7 @@ impl CmpLogRuntime {
         };
 
         // tbz will need to have special handling at emit time(masking operand1 value with operand2)
-        let special_case = match instr.mnemonic().unwrap() {
+        let special_case = match cs_instr.mnemonic().unwrap() {
             "tbz" => Some(SpecialCmpLogCase::Tbz),
             "tbnz" => Some(SpecialCmpLogCase::Tbnz),
             _ => None,

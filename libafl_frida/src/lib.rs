@@ -18,7 +18,9 @@ Additional documentation is available in [the `LibAFL` book](https://aflplus.plu
     clippy::missing_panics_doc,
     clippy::missing_docs_in_private_items,
     clippy::module_name_repetitions,
-    clippy::unreadable_literal
+    clippy::unreadable_literal,
+    clippy::ptr_cast_constness,
+    clippy::must_use_candidate
 )]
 #![cfg_attr(not(test), warn(
     missing_debug_implementations,
@@ -53,7 +55,6 @@ Additional documentation is available in [the `LibAFL` book](https://aflplus.plu
         overflowing_literals,
         path_statements,
         patterns_in_fns_without_body,
-        private_in_public,
         unconditional_recursion,
         unused,
         unused_allocation,
@@ -77,7 +78,7 @@ pub mod windows_hooks;
 pub mod coverage_rt;
 
 /// Hooking thread lifecycle events. Seems like this is apple-only for now.
-#[cfg(any(target_vendor = "apple"))]
+#[cfg(target_vendor = "apple")]
 pub mod pthread_hook;
 
 #[cfg(feature = "cmplog")]
@@ -97,7 +98,7 @@ pub mod executor;
 pub mod utils;
 
 // for parsing asan and cmplog cores
-use libafl::bolts::core_affinity::{get_core_ids, CoreId, Cores};
+use libafl_bolts::core_affinity::{get_core_ids, CoreId, Cores};
 
 /// A representation of the various Frida options
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

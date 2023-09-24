@@ -7,11 +7,11 @@ use alloc::{
 use core::{fmt::Debug, marker::PhantomData, time::Duration};
 
 use hashbrown::HashSet;
+use libafl_bolts::{current_time, impl_serdeany, AsIter, Named};
 use num_traits::Bounded;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bolts::{current_time, tuples::Named, AsIter},
     corpus::{Corpus, CorpusId, SchedulerTestcaseMetadata},
     events::{Event, EventFirer, LogSeverity},
     executors::{Executor, ExitKind, HasObservers},
@@ -22,19 +22,25 @@ use crate::{
     observers::{MapObserver, ObserversTuple, UsesObserver},
     schedulers::powersched::SchedulerMetadata,
     stages::Stage,
-    state::{HasClientPerfMonitor, HasCorpus, HasMetadata, HasNamedMetadata, UsesState},
+    state::{
+        HasClientPerfMonitor, HasCorpus, HasExecutions, HasMetadata, HasNamedMetadata, UsesState,
+    },
     Error,
 };
 
-crate::impl_serdeany!(UnstableEntriesMetadata);
 /// The metadata to keep unstable entries
 /// In libafl, the stability is the number of the unstable entries divided by the size of the map
 /// This is different from AFL++, which shows the number of the unstable entries divided by the number of filled entries.
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UnstableEntriesMetadata {
     unstable_entries: HashSet<usize>,
     map_len: usize,
 }
+impl_serdeany!(UnstableEntriesMetadata);
 
 impl UnstableEntriesMetadata {
     #[must_use]
@@ -86,7 +92,7 @@ where
     O: MapObserver,
     for<'de> <O as MapObserver>::Entry: Serialize + Deserialize<'de> + 'static,
     OT: ObserversTuple<E::State>,
-    E::State: HasCorpus + HasMetadata + HasClientPerfMonitor + HasNamedMetadata,
+    E::State: HasCorpus + HasMetadata + HasClientPerfMonitor + HasNamedMetadata + HasExecutions,
     Z: Evaluator<E, EM, State = E::State>,
 {
     #[inline]
@@ -115,12 +121,7 @@ where
 
         let mut iter = self.stage_max;
 
-        let input = state
-            .corpus()
-            .get(corpus_idx)?
-            .borrow_mut()
-            .load_input()?
-            .clone();
+        let input = state.corpus().cloned_input_for_id(corpus_idx)?;
 
         // Run once to get the initial calibration map
         executor.observers_mut().pre_exec_all(state, &input)?;
@@ -158,12 +159,7 @@ where
         let mut has_errors = false;
 
         while i < iter {
-            let input = state
-                .corpus()
-                .get(corpus_idx)?
-                .borrow_mut()
-                .load_input()?
-                .clone();
+            let input = state.corpus().cloned_input_for_id(corpus_idx)?;
 
             executor.observers_mut().pre_exec_all(state, &input)?;
             start = current_time();
@@ -226,7 +222,8 @@ where
             i += 1;
         }
 
-        if !unstable_entries.is_empty() {
+        let unstable_found = !unstable_entries.is_empty();
+        if unstable_found {
             // If we see new stable entries executing this new corpus entries, then merge with the existing one
             if state.has_metadata::<UnstableEntriesMetadata>() {
                 let existing = state
@@ -267,10 +264,8 @@ where
             psmeta.set_bitmap_entries(psmeta.bitmap_entries() + 1);
 
             let mut testcase = state.corpus().get(corpus_idx)?.borrow_mut();
-            let scheduled_count = testcase.scheduled_count();
 
             testcase.set_exec_time(total_time / (iter as u32));
-            testcase.set_scheduled_count(scheduled_count + 1);
             // log::trace!("time: {:#?}", testcase.exec_time());
 
             // If the testcase doesn't have its own `SchedulerTestcaseMetadata`, create it.
@@ -301,18 +296,25 @@ where
             data.set_handicap(handicap);
         }
 
+        *state.executions_mut() += i;
+
         // Send the stability event to the broker
-        if let Some(meta) = state.metadata_map().get::<UnstableEntriesMetadata>() {
-            let unstable_entries = meta.unstable_entries().len();
-            let map_len = meta.map_len();
-            mgr.fire(
-                state,
-                Event::UpdateUserStats {
-                    name: "stability".to_string(),
-                    value: UserStats::Ratio((map_len - unstable_entries) as u64, map_len as u64),
-                    phantom: PhantomData,
-                },
-            )?;
+        if unstable_found {
+            if let Some(meta) = state.metadata_map().get::<UnstableEntriesMetadata>() {
+                let unstable_entries = meta.unstable_entries().len();
+                let map_len = meta.map_len();
+                mgr.fire(
+                    state,
+                    Event::UpdateUserStats {
+                        name: "stability".to_string(),
+                        value: UserStats::Ratio(
+                            (map_len - unstable_entries) as u64,
+                            map_len as u64,
+                        ),
+                        phantom: PhantomData,
+                    },
+                )?;
+            }
         }
 
         Ok(())

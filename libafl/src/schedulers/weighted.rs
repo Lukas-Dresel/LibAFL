@@ -5,10 +5,12 @@ use alloc::string::{String, ToString};
 use core::marker::PhantomData;
 
 use hashbrown::HashMap;
+use libafl_bolts::rands::Rand;
 use serde::{Deserialize, Serialize};
 
+#[cfg(doc)]
+use crate::corpus::Testcase;
 use crate::{
-    bolts::rands::Rand,
     corpus::{Corpus, CorpusId, HasTestcase, SchedulerTestcaseMetadata},
     inputs::UsesInput,
     observers::{MapObserver, ObserversTuple},
@@ -22,9 +24,12 @@ use crate::{
     Error,
 };
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-
 /// The Metadata for `WeightedScheduler`
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct WeightedScheduleMetadata {
     /// The fuzzer execution spent in the current cycles
     runs_in_current_cycle: usize,
@@ -85,7 +90,7 @@ impl WeightedScheduleMetadata {
     }
 }
 
-crate::impl_serdeany!(WeightedScheduleMetadata);
+libafl_bolts::impl_serdeany!(WeightedScheduleMetadata);
 
 /// A corpus scheduler using power schedules with weighted queue item selection algo.
 #[derive(Clone, Debug)]
@@ -154,12 +159,12 @@ where
 
         for i in state.corpus().ids() {
             let mut testcase = state.corpus().get(i)?.borrow_mut();
-            let weight = F::compute(&mut *testcase, state)?;
+            let weight = F::compute(state, &mut *testcase)?;
             weights.insert(i, weight);
             sum += weight;
         }
 
-        for (i, w) in weights.iter() {
+        for (i, w) in &weights {
             p_arr.insert(*i, w * (n as f64) / sum);
         }
 
@@ -302,7 +307,7 @@ where
     O: MapObserver,
     S: HasCorpus + HasMetadata + HasRand + HasTestcase,
 {
-    /// Add an entry to the corpus and return its index
+    /// Called when a [`Testcase`] is added to the corpus
     fn on_add(&mut self, state: &mut S, idx: CorpusId) -> Result<(), Error> {
         let current_idx = *state.corpus().current();
 
@@ -408,11 +413,6 @@ where
 
         if let Some(idx) = current_idx {
             let mut testcase = state.testcase_mut(idx)?;
-            let scheduled_count = testcase.scheduled_count();
-
-            // increase scheduled count, this was fuzz_level in afl
-            testcase.set_scheduled_count(scheduled_count + 1);
-
             let tcmeta = testcase.metadata_mut::<SchedulerTestcaseMetadata>()?;
 
             if tcmeta.handicap() >= 4 {

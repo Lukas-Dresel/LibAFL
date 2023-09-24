@@ -48,7 +48,6 @@
         overflowing_literals,
         path_statements,
         patterns_in_fns_without_body,
-        private_in_public,
         unconditional_recursion,
         unused,
         unused_allocation,
@@ -58,15 +57,18 @@
     )
 )]
 
+#[allow(clippy::ignored_unit_patterns)]
 pub mod inmemory;
 pub use inmemory::InMemoryBytesCoverageSugar;
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::ignored_unit_patterns)]
 pub mod qemu;
 #[cfg(target_os = "linux")]
 pub use qemu::QemuBytesCoverageSugar;
 
 #[cfg(target_family = "unix")]
+#[allow(clippy::ignored_unit_patterns)]
 pub mod forkserver;
 #[cfg(target_family = "unix")]
 pub use forkserver::ForkserverBytesCoverageSugar;

@@ -4,7 +4,7 @@ use alloc::borrow::ToOwned;
 use core::marker::PhantomData;
 
 use crate::{
-    corpus::{Corpus, CorpusId},
+    corpus::{Corpus, CorpusId, HasTestcase},
     inputs::UsesInput,
     schedulers::{RemovableScheduler, Scheduler},
     state::{HasCorpus, UsesState},
@@ -24,11 +24,11 @@ where
     type State = S;
 }
 
-impl<S> RemovableScheduler for QueueScheduler<S> where S: HasCorpus {}
+impl<S> RemovableScheduler for QueueScheduler<S> where S: HasCorpus + HasTestcase {}
 
 impl<S> Scheduler for QueueScheduler<S>
 where
-    S: HasCorpus,
+    S: HasCorpus + HasTestcase,
 {
     fn on_add(&mut self, state: &mut Self::State, idx: CorpusId) -> Result<(), Error> {
         // Set parent id
@@ -57,16 +57,6 @@ where
             Ok(id)
         }
     }
-
-    /// Set current fuzzed corpus id and `scheduled_count`
-    fn set_current_scheduled(
-        &mut self,
-        state: &mut Self::State,
-        next_idx: Option<CorpusId>,
-    ) -> Result<(), Error> {
-        *state.corpus_mut().current_mut() = next_idx;
-        Ok(())
-    }
 }
 
 impl<S> QueueScheduler<S> {
@@ -91,8 +81,9 @@ mod tests {
 
     use std::{fs, path::PathBuf};
 
+    use libafl_bolts::rands::StdRand;
+
     use crate::{
-        bolts::rands::StdRand,
         corpus::{Corpus, OnDiskCorpus, Testcase},
         feedbacks::ConstFeedback,
         inputs::bytes::BytesInput,
@@ -107,10 +98,7 @@ mod tests {
 
         let mut q =
             OnDiskCorpus::<BytesInput>::new(PathBuf::from("target/.test/fancy/path")).unwrap();
-        let t = Testcase::with_filename(
-            BytesInput::new(vec![0_u8; 4]),
-            "target/.test/fancy/path/fancyfile".into(),
-        );
+        let t = Testcase::with_filename(BytesInput::new(vec![0_u8; 4]), "fancyfile".into());
         q.add(t).unwrap();
 
         let objective_q =
@@ -133,8 +121,8 @@ mod tests {
             .unwrap()
             .clone();
 
-        assert_eq!(filename, "target/.test/fancy/path/fancyfile");
+        assert_eq!(filename, "fancyfile");
 
-        fs::remove_dir_all("target/.test/fancy").unwrap();
+        fs::remove_dir_all("target/.test/fancy/path").unwrap();
     }
 }

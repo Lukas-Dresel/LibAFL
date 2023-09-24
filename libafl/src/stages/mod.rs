@@ -27,6 +27,9 @@ pub use power::{PowerMutationalStage, StdPowerMutationalStage};
 pub mod generalization;
 pub use generalization::GeneralizationStage;
 
+pub mod stats;
+pub use stats::AflStatsStage;
+
 pub mod owned;
 pub use owned::StagesOwnedList;
 
@@ -66,7 +69,10 @@ use crate::{
     inputs::UsesInput,
     observers::ObserversTuple,
     schedulers::Scheduler,
-    state::{HasClientPerfMonitor, HasExecutions, HasMetadata, HasRand, UsesState},
+    state::{
+        HasClientPerfMonitor, HasCorpus, HasExecutions, HasLastReportTime, HasMetadata, HasRand,
+        UsesState,
+    },
     Error, EvaluatorObservers, ExecutesInput, ExecutionProcessor, HasScheduler,
 };
 
@@ -248,7 +254,12 @@ where
 impl<CS, E, EM, OT, PS, Z> Stage<E, EM, Z> for PushStageAdapter<CS, EM, OT, PS, Z>
 where
     CS: Scheduler,
-    CS::State: HasClientPerfMonitor + HasExecutions + HasMetadata + HasRand,
+    CS::State: HasClientPerfMonitor
+        + HasExecutions
+        + HasMetadata
+        + HasRand
+        + HasCorpus
+        + HasLastReportTime,
     E: Executor<EM, Z> + HasObservers<Observers = OT, State = CS::State>,
     EM: EventFirer<State = CS::State>
         + EventRestarter
@@ -380,7 +391,7 @@ pub mod pybind {
 
     macro_rules! unwrap_me_mut {
         ($wrapper:expr, $name:ident, $body:block) => {
-            crate::unwrap_me_mut_body!($wrapper, $name, $body, PythonStageWrapper,
+            libafl_bolts::unwrap_me_mut_body!($wrapper, $name, $body, PythonStageWrapper,
                 { StdMutational },
                 {
                     Python(py_wrapper) => {

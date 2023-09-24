@@ -3,11 +3,12 @@
 use alloc::vec::Vec;
 use core::cmp::{max, min};
 
+use libafl_bolts::{
+    rands::Rand,
+    tuples::{tuple_list, tuple_list_type},
+};
+
 use crate::{
-    bolts::{
-        rands::Rand,
-        tuples::{tuple_list, tuple_list_type},
-    },
     corpus::Corpus,
     inputs::{EncodedInput, UsesInput},
     mutators::{
@@ -332,13 +333,11 @@ where
             }
         }
 
-        let other_size = state
-            .corpus()
-            .get(idx)?
-            .borrow_mut()
-            .load_input()?
-            .codes()
-            .len();
+        let other_size = {
+            let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
+            other_testcase.load_input(state.corpus())?.codes().len()
+        };
+
         if other_size < 2 {
             return Ok(MutationResult::Skipped);
         }
@@ -348,9 +347,6 @@ where
         let to = state.rand_mut().below(size as u64) as usize;
         let mut len = 1 + state.rand_mut().below((other_size - from) as u64) as usize;
 
-        let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
-        let other = other_testcase.load_input()?;
-
         if size + len > max_size {
             if max_size > size {
                 len = max_size - size;
@@ -358,6 +354,10 @@ where
                 return Ok(MutationResult::Skipped);
             }
         }
+
+        let other_testcase = state.corpus().get(idx)?.borrow_mut();
+        // no need to `load_input` again -  we did that above already.
+        let other = other_testcase.input().as_ref().unwrap();
 
         input.codes_mut().resize(size + len, 0);
         unsafe {
@@ -410,13 +410,12 @@ where
             }
         }
 
-        let other_size = state
-            .corpus()
-            .get(idx)?
-            .borrow_mut()
-            .load_input()?
-            .codes()
-            .len();
+        let other_size = {
+            // new scope to make the borrow checker happy
+            let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
+            other_testcase.load_input(state.corpus())?.codes().len()
+        };
+
         if other_size < 2 {
             return Ok(MutationResult::Skipped);
         }
@@ -425,8 +424,9 @@ where
         let len = state.rand_mut().below(min(other_size - from, size) as u64) as usize;
         let to = state.rand_mut().below((size - len) as u64) as usize;
 
-        let mut other_testcase = state.corpus().get(idx)?.borrow_mut();
-        let other = other_testcase.load_input()?;
+        let other_testcase = state.corpus().get(idx)?.borrow_mut();
+        // no need to load the input again, it'll already be present at this point.
+        let other = other_testcase.input().as_ref().unwrap();
 
         unsafe {
             buffer_copy(input.codes_mut(), other.codes(), from, to, len);

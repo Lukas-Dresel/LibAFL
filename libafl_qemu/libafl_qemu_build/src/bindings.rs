@@ -4,6 +4,10 @@ use bindgen::{BindgenError, Bindings};
 
 const WRAPPER_HEADER: &str = r#"
 
+// https://github.com/rust-lang/rust-bindgen/issues/2500
+#define __AVX512VLFP16INTRIN_H
+#define __AVX512FP16INTRIN_H
+
 // QEMU_BUILD_BUG* cause an infinite recursion in bindgen when target is arm
 #include "qemu/compiler.h"
 
@@ -25,6 +29,7 @@ const WRAPPER_HEADER: &str = r#"
 #include "qapi/error.h"
 
 #include "exec/target_page.h"
+#include "exec/cpu-defs.h"
 #include "hw/qdev-core.h"
 #include "hw/qdev-properties.h"
 #include "qemu/error-report.h"
@@ -44,11 +49,13 @@ const WRAPPER_HEADER: &str = r#"
 #else
 
 #include "migration/vmstate.h"
+#include "migration/savevm.h"
 #include "hw/core/sysemu-cpu-ops.h"
 #include "exec/address-spaces.h"
 #include "sysemu/tcg.h"
 #include "sysemu/replay.h"
 
+#include "libafl_extras/syx-snapshot/device-save.h"
 #include "libafl_extras/syx-snapshot/syx-snapshot.h"
 
 #endif
@@ -99,6 +106,7 @@ pub fn generate(
         .allowlist_type("qemu_plugin_mem_rw")
         .allowlist_type("MemOpIdx")
         .allowlist_type("MemOp")
+        .allowlist_type("device_snapshot_kind_t")
         .allowlist_function("qemu_user_init")
         .allowlist_function("target_mmap")
         .allowlist_function("target_mprotect")
@@ -111,10 +119,12 @@ pub fn generate(
         .allowlist_function("tlb_plugin_lookup")
         .allowlist_function("qemu_plugin_hwaddr_phys_addr")
         .allowlist_function("qemu_plugin_get_hwaddr")
+        .allowlist_function("qemu_target_page_size")
         .allowlist_function("syx_snapshot_init")
         .allowlist_function("syx_snapshot_create")
         .allowlist_function("syx_snapshot_root_restore")
         .allowlist_function("syx_snapshot_dirty_list_add")
+        .allowlist_function("device_list_all")
         .blocklist_function("main_loop_wait") // bindgen issue #1313
         .parse_callbacks(Box::new(bindgen::CargoCallbacks));
 

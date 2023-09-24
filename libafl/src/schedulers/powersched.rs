@@ -20,10 +20,14 @@ use crate::{
 /// The n fuzz size
 pub const N_FUZZ_SIZE: usize = 1 << 21;
 
-crate::impl_serdeany!(SchedulerMetadata);
+libafl_bolts::impl_serdeany!(SchedulerMetadata);
 
 /// The metadata used for power schedules
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[cfg_attr(
+    any(not(feature = "serdeany_autoreg"), miri),
+    allow(clippy::unsafe_derive_deserialize)
+)] // for SerdeAny
 pub struct SchedulerMetadata {
     /// Powerschedule strategy
     strat: Option<PowerSchedule>,
@@ -252,7 +256,7 @@ where
     S: HasCorpus + HasMetadata + HasTestcase,
     O: MapObserver,
 {
-    /// Add an entry to the corpus and return its index
+    /// Called when a [`Testcase`] is added to the corpus
     fn on_add(&mut self, state: &mut Self::State, idx: CorpusId) -> Result<(), Error> {
         let current_idx = *state.corpus().current();
 
@@ -336,11 +340,6 @@ where
 
         if let Some(idx) = current_idx {
             let mut testcase = state.testcase_mut(idx)?;
-            let scheduled_count = testcase.scheduled_count();
-
-            // increase scheduled count, this was fuzz_level in afl
-            testcase.set_scheduled_count(scheduled_count + 1);
-
             let tcmeta = testcase.metadata_mut::<SchedulerTestcaseMetadata>()?;
 
             if tcmeta.handicap() >= 4 {
