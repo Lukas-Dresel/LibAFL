@@ -43,6 +43,7 @@ pub struct TracingRuntime {
     print_to_stdout: bool,
     trace_before_symbolic_input: bool,
     saw_symbolic_input: bool,
+    num_exprs_so_far: NonZeroUsize,
 }
 
 impl TracingRuntime {
@@ -59,6 +60,7 @@ impl TracingRuntime {
             print_to_stdout,
             trace_before_symbolic_input,
             saw_symbolic_input: false,
+            num_exprs_so_far: 1.try_into().unwrap(),
         }
     }
 
@@ -115,10 +117,21 @@ impl TracingRuntime {
 
             Some(res)
         } else {
+            let val = self.num_exprs_so_far;
             if self.print_to_stdout {
-                println!("{:x?}", message);
+                println!("0x{val:x}: {:x?}", message);
             }
-            None
+            match message {
+                SymExpr::Call { .. }
+                | SymExpr::BasicBlock { .. }
+                | SymExpr::Return { .. }
+                | SymExpr::SetParameter { .. }
+                | SymExpr::SetReturnValue { .. } => {}
+                _ => {
+                    self.num_exprs_so_far = self.num_exprs_so_far.checked_add(1).unwrap();
+                }
+            }
+            Some(val)
         }
     }
 }
