@@ -520,12 +520,10 @@ impl<E> TimeoutForkserverExecutor<E> {
     }
 }
 
-impl<E, EM, Z> Executor<EM, Z> for TimeoutForkserverExecutor<E>
+impl<E> TimeoutForkserverExecutor<E>
 where
-    E: Executor<EM, Z> + HasForkserver + HasObservers + Debug,
+    E: HasForkserver + HasObservers + Debug,
     E::Input: HasTargetBytes,
-    EM: UsesState<State = E::State>,
-    Z: UsesState<State = E::State>,
 {
     #[inline]
     pub fn execute_input(
@@ -982,7 +980,7 @@ impl<'a, SP> ForkserverExecutorBuilder<'a, SP> {
         let (rlen, start_constant) = forkserver.read_st()?;
         if rlen != 4 {
             // use nonblocking waitpid to check if the forkserver is still alive
-            let status_maybe = nix::sys::wait::waitpid(forkserver.child_pid(), Some(nix::sys::wait::WaitPidFlag::WNOHANG)).expect("nonblocking waitpid failed when trying to get an error code for the forkserver??");
+            let status_maybe = waitpid(forkserver.child_pid(), Some(nix::sys::wait::WaitPidFlag::WNOHANG)).expect("nonblocking waitpid failed when trying to get an error code for the forkserver??");
 
             let msg = format!(
                 "Failed to start the forkserver, could not read start constant: got {} bytes from {:?}, status: {:?}",
@@ -1244,14 +1242,12 @@ impl<'a> Default for ForkserverExecutorBuilder<'a, UnixShMemProvider> {
     }
 }
 
-impl<EM, OT, S, SP, Z> Executor<EM, Z> for ForkserverExecutor<OT, S, SP>
+impl<OT, S, SP> ForkserverExecutor<OT, S, SP>
 where
     OT: ObserversTuple<S>,
     SP: ShMemProvider,
     S: UsesInput,
     S::Input: HasTargetBytes,
-    EM: UsesState<State = S>,
-    Z: UsesState<State = S>,
 {
     #[inline]
     pub fn execute_input(

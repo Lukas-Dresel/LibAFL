@@ -199,7 +199,7 @@ where
         P: AsRef<Path>,
     {
         Self::_new(
-            InMemoryOnDiskCorpus::with_meta_format(dir_path, meta_format)?,
+            InMemoryOnDiskCorpus::with_meta_format(dir_path, Some(meta_format))?,
             cache_max_len,
         )
     }

@@ -68,9 +68,12 @@ pub trait HasCorpus: UsesInput {
 
 pub trait BetterStateTrait: UsesInput
 {
+    /// The associated type implementing [`Rand`]
     type Rand: Rand;
+    /// The associated type implementing [`Corpus`]
     type Corpus: Corpus<Input = <Self as UsesInput>::Input>;
 
+    /// Get mutable references to all important state components simultaneously
     fn get_state_components_rand_corpus_metadata(&mut self) -> (&mut Self::Rand, &mut Self::Corpus, &mut SerdeAnyMap);
 }
 
