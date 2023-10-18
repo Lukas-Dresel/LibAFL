@@ -1014,6 +1014,20 @@ where
     }
 }
 
+#[cfg(feature = "std")]
+impl<S, SP> HasCustomBufHandlers for LlmpRestartingEventManager<S, SP>
+where
+    S: UsesInput,
+    SP: ShMemProvider + 'static,
+{
+    fn add_custom_buf_handler(
+        &mut self,
+        handler: Box<dyn FnMut(&mut S, &String, &[u8]) -> Result<CustomBufEventResult, Error>>,
+    ) {
+        self.llmp_mgr.add_custom_buf_handler(handler);
+    }
+}
+
 /// The llmp connection from the actual fuzzer to the process supervising it
 const _ENV_FUZZER_SENDER: &str = "_AFL_ENV_FUZZER_SENDER";
 const _ENV_FUZZER_RECEIVER: &str = "_AFL_ENV_FUZZER_RECEIVER";
