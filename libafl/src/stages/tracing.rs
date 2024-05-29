@@ -9,7 +9,7 @@ use libafl_bolts::tuples::MatchName;
 use crate::monitors::PerfFeature;
 use crate::{
     corpus::{Corpus, CorpusId},
-    executors::{Executor, HasObservers, ShadowExecutor},
+    executors::{Executor, ExitKind, HasObservers, ShadowExecutor},
     inputs::{BytesInput, UsesInput},
     mark_feature_time,
     observers::{AFLppCmpObserver, ObserversTuple},
@@ -67,6 +67,7 @@ where
             .tracer_executor
             .run_target(fuzzer, state, manager, &input)?;
         mark_feature_time!(state, PerfFeature::TargetExecution);
+        // assert!(exit_kind == ExitKind::Ok || exit_kind == ExitKind::Timeout, "Exit kind is not Ok or Timeout: {:?}", exit_kind);
 
         *state.executions_mut() += 1;
 

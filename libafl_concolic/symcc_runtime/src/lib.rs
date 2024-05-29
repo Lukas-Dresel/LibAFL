@@ -30,6 +30,7 @@
 #![allow(clippy::module_name_repetitions, clippy::missing_panics_doc)]
 pub mod filter;
 pub mod tracing;
+pub mod mem_model;
 
 // The following exports are used by the `export_runtime` macro. They are therefore exported, but hidden from docs, as they are not supposed to be used directly by the user.
 #[doc(hidden)]
@@ -40,6 +41,30 @@ pub mod cpp_runtime {
     #![allow(non_snake_case)]
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
+pub mod cpp_interface {
+    #![allow(non_upper_case_globals)]
+    #![allow(non_camel_case_types)]
+    #![allow(non_snake_case)]
+    include!(concat!(env!("OUT_DIR"), "/interface.rs"));
+}
+
+pub fn get_symbolic_exprs_for_memory(addr: usize, length: usize) -> Vec<Option<RSymExpr>> {
+    // allocate the output vector of desired length
+    let mut sym_exprs = (0..length).map(|_| None).collect::<Vec<_>>();
+
+    unsafe {
+        cpp_interface::_sym_get_symbolic_exprs_for_memory(
+            sym_exprs.as_mut_ptr() as *mut usize,
+            addr as *mut c_void,
+            length,
+        );
+    }
+    // println!("sym_exprs: {:x?} bytes @ {:x?} => {:?}", length, addr, sym_exprs);
+
+    sym_exprs
+}
+
+use std::os::raw::c_void;
 
 #[doc(hidden)]
 pub use ctor::ctor;
@@ -307,6 +332,8 @@ macro_rules! export_rust_runtime_fn {
             length: usize,
             little_endian: bool,
         ) -> Option<RSymExpr> {
+            // std::fs::write("/tmp/backend_read_memory", format!("addr_expr: {:?}, concolic_read_value: {:?}, addr: {:p}, length: {}, little_endian: {}", addr_expr, concolic_read_value, addr, length, little_endian)).unwrap();
+
             return $rt_cb(|rt| {
                 rt.backend_read_memory(addr_expr, concolic_read_value, addr, length, little_endian)
             });
@@ -614,6 +641,7 @@ macro_rules! rust_runtime_function_declaration {
             length: usize,
             little_endian: bool,
         ) -> Option<RSymExpr> {
+            // let sym_exprs = crate::cpp_runtime::_
             if let Some(inner) = &mut self.inner {
                 return inner.backend_read_memory(addr_expr, concolic_read_value, addr, length, little_endian);
             }

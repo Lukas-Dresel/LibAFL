@@ -1,12 +1,12 @@
 //! Tracing of expressions in a serialized form.
 
-use std::{num::NonZeroUsize, arch::asm};
+use std::{arch::asm, io::{Seek, Write}, num::NonZeroUsize};
 
-pub use libafl::observers::concolic::serialization_format::StdShMemMessageFileWriter;
-use libafl::observers::concolic::SymExpr;
+pub use libafl::observers::concolic::serialization_format::StdShMemBinaryMessageWriter;
+use libafl::observers::concolic::{serialization_format::{BinaryMessageWriter, MessageWriter}, BoundType, SymExpr, SymbolicAddressDereferenceMetadata};
 use lru::LruCache;
 
-use crate::{RSymExpr, Runtime};
+use crate::{get_symbolic_exprs_for_memory, mem_model::ApproximateMemoryModel, RSymExpr, Runtime};
 
 /// Traces the expressions according to the format described in [`libafl::observers::concolic::serialization_format`].
 /// The format can be read from elsewhere to perform processing of the expressions outside of the runtime.
@@ -34,8 +34,9 @@ impl CacheableExpression {
         }
     }
 }
-pub struct TracingRuntime {
-    writer: Option<StdShMemMessageFileWriter>,
+pub struct TracingRuntime<W: MessageWriter, MEM: ApproximateMemoryModel, const SYM_MEM_TRESHOLD: usize> {
+    mem_model_impl: MEM,
+    writer: Option<W>,
     // LRU cache for expressions, to avoid duplicate expressions in the trace
     expression_cache: LruCache<CacheableExpression, RSymExpr>,
     const_int_cache: LruCache<(u64,u8), RSymExpr>,
@@ -46,13 +47,17 @@ pub struct TracingRuntime {
     num_exprs_so_far: NonZeroUsize,
 }
 
-impl TracingRuntime {
+impl<W: MessageWriter, MEM: ApproximateMemoryModel, const SYM_MEM_TRESHOLD: usize> TracingRuntime<W, MEM, SYM_MEM_TRESHOLD> {
     /// Creates the runtime, tracing using the given writer.
     /// When `trace_locations` is true, location information for calls, returns and basic blocks will also be part of the trace.
     /// Tracing location information can drastically increase trace size. It is therefore recommended to not active this if not needed.
     #[must_use]
-    pub fn new(writer: Option<StdShMemMessageFileWriter>, trace_locations: bool, print_to_stdout: bool, trace_before_symbolic_input: bool) -> Self {
+    pub fn new(
+        mem_model_impl: MEM,
+        writer: Option<W>,
+        trace_locations: bool, print_to_stdout: bool, trace_before_symbolic_input: bool) -> Self {
         Self {
+            mem_model_impl,
             writer,
             expression_cache: LruCache::new(NonZeroUsize::new(0x800).unwrap()),
             const_int_cache: LruCache::new(NonZeroUsize::new(0x100).unwrap()),
@@ -86,7 +91,6 @@ impl TracingRuntime {
                 if let Some(cached) = self.const_int_cache.get(int_cache_key) {
                     return Some(*cached);
                 }
-
             }
             #[cfg(feature="concolic_expression_caching")]
             let cache_key = CacheableExpression::for_symexpr(&message);
@@ -99,12 +103,12 @@ impl TracingRuntime {
 
             let res = if self.print_to_stdout {
                 let msg_string = format!("{:x?}", message);
-                let res = w.write_message(message).unwrap();
+                let res = w.write_message(message.clone()).unwrap();
                 println!("{:x}: {}", res, msg_string);
                 res
             }
             else {
-                w.write_message(message).unwrap()
+                w.write_message(message.clone()).unwrap()
             };
             #[cfg(feature="concolic_expression_caching")]
             if let Some(int_cache_key) = int_cache_key {
@@ -114,6 +118,8 @@ impl TracingRuntime {
             if let Some(cache_key) = cache_key {
                 self.expression_cache.push(cache_key, res);
             }
+
+            self.mem_model_impl.register_new_expr(res, message);
 
             Some(res)
         } else {
@@ -167,7 +173,40 @@ macro_rules! binary_expression_builder {
     };
 }
 
-impl Runtime for TracingRuntime {
+pub fn symbolic_memory_dereference_data(sym_mem_threshold: usize, concrete_addr: *mut u8, sym_range: (usize, usize), length: usize) -> Option<SymbolicAddressDereferenceMetadata> {
+    let (min_addr, max_addr) = sym_range;
+    assert!(min_addr <= max_addr, "overapproximate range is not ordered");
+    assert!(min_addr <= concrete_addr as usize && concrete_addr as usize <= max_addr,
+            "overapproximate range does not contain address");
+
+    let symbolic_addr_range = max_addr - min_addr;
+
+    if (max_addr - min_addr) <= sym_mem_threshold {
+        let sym_range_start = min_addr;
+        let sym_range_length = (max_addr - min_addr) + length;
+        let touched_data_symbolic = get_symbolic_exprs_for_memory(sym_range_start, sym_range_length);
+        let touched_data_concrete = unsafe {
+            std::slice::from_raw_parts(sym_range_start as *const u8, sym_range_length)
+        }.to_vec();
+        return Some(SymbolicAddressDereferenceMetadata::KnownBoundDataAvailable
+            {
+                bound_type: BoundType::OverApproximate,
+                min_addr,
+                max_addr,
+                touched_data_concrete,
+                touched_data_symbolic
+            }
+        )
+    }
+    return None;
+}
+
+impl<W, MEM, const SYM_MEM_TRESHOLD: usize> Runtime for TracingRuntime<W, MEM, SYM_MEM_TRESHOLD>
+where
+    W: MessageWriter,
+    MEM: ApproximateMemoryModel,
+
+{
     expression_builder!(get_input_byte(offset: usize, value: u8) => InputByte);
 
     expression_builder!(build_integer(value: u64, bits: u8) => Integer);
@@ -387,16 +426,50 @@ impl Runtime for TracingRuntime {
         addr_expr: Option<RSymExpr>, concolic_read_value: Option<RSymExpr>,
         addr: *mut u8, length:usize, little_endian:bool
     ) -> Option<RSymExpr> {
-        let msg_id = self.write_message(
-            SymExpr::MemoryRead {
-                address_expr: addr_expr,
-                value_read: concolic_read_value,
-                concrete_address: addr as usize,
-                length: length as usize,
-                little_endian,
-            }
-        ).unwrap();
-        if concolic_read_value.is_some() { // only if we actually read from a symbolic buffer should we return this
+
+        let sym_addr_data: Option<(RSymExpr, SymbolicAddressDereferenceMetadata)> =
+            addr_expr
+            .map(|addr_expr| {
+                if let Some(overapprox_range) = self.mem_model_impl.get_over_approximate_pointer_range(addr_expr) {
+                    if let Some(deref_data) = symbolic_memory_dereference_data(
+                            SYM_MEM_TRESHOLD,
+                            addr,
+                            overapprox_range,
+                            length
+                        ) {
+                        return (addr_expr, deref_data);
+                    }
+                }
+                // if the overapproximation is too large, we ask the solver instead
+                else if let Some(exact_range) = self.mem_model_impl.get_exact_pointer_range(addr_expr) {
+                    if let Some(deref_data) = symbolic_memory_dereference_data(
+                        SYM_MEM_TRESHOLD,
+                        addr,
+                        exact_range,
+                        length
+                    ) {
+                        return (addr_expr, deref_data);
+                    }
+                }
+
+                return (addr_expr, SymbolicAddressDereferenceMetadata::UnknownBound);
+        });
+        let symbolic_value_read = concolic_read_value.is_some();
+        let symbolic_address_read = sym_addr_data.is_some();
+        if symbolic_value_read || symbolic_address_read {
+            // return the msg_id if
+            //   1) we actually read from a symbolic buffer
+            //   2) we read from a symbolic address
+
+            let msg_id = self.write_message(
+                SymExpr::SymbolicMemoryRead {
+                    address_expr: sym_addr_data,
+                    value_read_expr: concolic_read_value,
+                    address_concrete: addr as usize,
+                    length: length as usize,
+                    little_endian,
+                }
+            ).unwrap();
             Some(msg_id)
         }
         else {
@@ -420,7 +493,7 @@ impl Runtime for TracingRuntime {
     }
 }
 
-impl Drop for TracingRuntime {
+impl<W: MessageWriter, MEM: ApproximateMemoryModel, const SYM_MEM_TRESHOLD: usize> Drop for TracingRuntime<W, MEM, SYM_MEM_TRESHOLD> {
     fn drop(&mut self) {
         // manually end the writer to update the length prefix
         if let Some(writer) = &mut self.writer {

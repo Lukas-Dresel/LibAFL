@@ -51,7 +51,7 @@ use std::{
 use bincode::{DefaultOptions, Options};
 pub use bincode::{ErrorKind, Result};
 
-use super::{SymExpr, SymExprRef};
+use super::{SymExpr, SymExprRef, SymbolicAddressDereferenceMetadata};
 
 fn serialization_options() -> DefaultOptions {
     DefaultOptions::new()
@@ -103,7 +103,7 @@ impl<R: Read> MessageFileReader<R> {
     }
 
     /// Makes the given `SymExprRef` absolute accoring to the `current_id` counter.
-    /// See [`MessageFileWriter::make_relative`] for the inverse function.
+    /// See [`BinaryMessageWriter::make_relative`] for the inverse function.
     fn make_absolute(&self, expr: SymExprRef) -> SymExprRef {
         SymExprRef::new(self.current_id - expr.get()).unwrap()
     }
@@ -201,16 +201,30 @@ impl<R: Read> MessageFileReader<R> {
             SymExpr::ConcretizePointer { expr, .. } | SymExpr::ConcretizeSize { expr, .. } => {
                 *expr = self.make_absolute(*expr);
             }
-            SymExpr::MemoryRead { address_expr, value_read, .. } => {
+            SymExpr::SymbolicMemoryRead {
+                address_expr,
+                value_read_expr,
+                ..
+            } => {
                 // *address = self.make_absolute(*address);
-                address_expr.as_mut().map(|x| *x = self.make_absolute(*x));
-                value_read.as_mut().map(|x| *x = self.make_absolute(*x));
+                address_expr.as_mut().map(|(sym_addr, deref_meta)| {
+                    *sym_addr = self.make_absolute(*sym_addr);
+                    match deref_meta {
+                        SymbolicAddressDereferenceMetadata::KnownBoundDataAvailable {
+                            bound_type, min_addr, max_addr, touched_data_concrete, touched_data_symbolic
+                        } => {
+                            for expr in touched_data_symbolic {
+                                if let Some(expr) = expr {
+                                    *expr = self.make_absolute(*expr);
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
+                });
+                value_read_expr.as_mut().map(|x| *x = self.make_absolute(*x));
 
-                // see explanation in make_relative case for why this is necessary (short: not enough data, would have
-                // to return unconstrained values or something)
-                if value_read.is_some() {
-                    self.current_id += 1;
-                }
+                self.current_id += 1;
             }
             SymExpr::MemoryWrite { symbolic_address, written_value, .. } => {
                 symbolic_address.as_mut().map(|x| *x = self.make_absolute(*x));
@@ -252,29 +266,50 @@ impl<R: Read> MessageFileReader<R> {
     }
 }
 
-/// A `MessageFileWriter` writes a stream of [`SymExpr`] to any [`Write`]. For each written expression, it returns
+pub trait MessageWriter {
+    fn write_message(&mut self, message: SymExpr) -> Result<SymExprRef>;
+    fn write_trace_size(&mut self) -> io::Result<()>;
+
+    /// Updates the trace header which stores the total length of the trace in bytes.
+    fn update_trace_header(&mut self) -> io::Result<()> {
+        self.write_trace_size()?;
+        Ok(())
+    }
+}
+
+/// A `BinaryMessageWriter` writes a stream of [`SymExpr`] to any [`Write`]. For each written expression, it returns
 /// a [`SymExprRef`] which should be used to refer back to it.
-pub struct MessageFileWriter<W: Write> {
+pub struct BinaryMessageWriter<W: Write> {
     id_counter: usize,
     writer: W,
     writer_start_position: u64,
     serialization_options: DefaultOptions,
 }
 
-impl<W> Debug for MessageFileWriter<W>
+impl<W> Debug for BinaryMessageWriter<W>
 where
     W: Write,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MessageFileWriter")
+        f.debug_struct("BinaryMessageWriter")
             .field("id_counter", &self.id_counter)
             .field("writer_start_position", &self.writer_start_position)
             .finish_non_exhaustive()
     }
 }
 
-impl<W: Write + Seek> MessageFileWriter<W> {
-    /// Create a `MessageFileWriter` from the given [`Write`].
+impl<W: Write + Seek> MessageWriter for BinaryMessageWriter<W> {
+    fn write_message(&mut self, message: SymExpr) -> Result<SymExprRef> {
+        BinaryMessageWriter::write_message(self, message)
+    }
+
+    fn write_trace_size(&mut self) -> io::Result<()> {
+        BinaryMessageWriter::write_trace_size(self)
+    }
+}
+
+impl<W: Write + Seek> BinaryMessageWriter<W> {
+    /// Create a `BinaryMessageWriter` from the given [`Write`].
     pub fn from_writer(mut writer: W) -> io::Result<Self> {
         let writer_start_position = writer.stream_position()?;
         // write dummy trace length
@@ -306,12 +341,6 @@ impl<W: Write + Seek> MessageFileWriter<W> {
         Ok(())
     }
 
-    /// Updates the trace header which stores the total length of the trace in bytes.
-    pub fn update_trace_header(&mut self) -> io::Result<()> {
-        self.write_trace_size()?;
-        Ok(())
-    }
-
     fn make_relative(&self, expr: SymExprRef) -> SymExprRef {
         let expr = expr.get();
         SymExprRef::new(self.id_counter - expr).unwrap_or_else(|| {
@@ -335,9 +364,7 @@ impl<W: Write + Seek> MessageFileWriter<W> {
             | SymExpr::NullPointer
             | SymExpr::True
             | SymExpr::False
-            | SymExpr::Bool { .. } => {
-                self.id_counter += 1;
-            }
+            | SymExpr::Bool { .. } => { }
             SymExpr::Neg { op }
             | SymExpr::FloatAbs { op }
             | SymExpr::Not { op }
@@ -353,7 +380,6 @@ impl<W: Write + Seek> MessageFileWriter<W> {
             | SymExpr::BoolToBit { op, .. }
             | SymExpr::Extract { op, .. } => {
                 *op = self.make_relative(*op);
-                self.id_counter += 1;
             }
             SymExpr::Add { a, b }
             | SymExpr::Sub { a, b }
@@ -408,7 +434,6 @@ impl<W: Write + Seek> MessageFileWriter<W> {
             } => {
                 *a = self.make_relative(*a);
                 *b = self.make_relative(*b);
-                self.id_counter += 1;
             }
             SymExpr::PathConstraint { constraint: op, .. } => {
                 *op = self.make_relative(*op);
@@ -416,48 +441,46 @@ impl<W: Write + Seek> MessageFileWriter<W> {
             SymExpr::ConcretizePointer { expr, ..} | SymExpr::ConcretizeSize { expr, .. } => {
                 *expr = self.make_relative(*expr);
             }
-            SymExpr::MemoryRead { address_expr, value_read, .. } => {
-                address_expr.as_mut().map(|x| *x = self.make_relative(*x));
-                value_read.as_mut().map(|x| *x = self.make_relative(*x));
+            SymExpr::SymbolicMemoryRead { address_expr, value_read_expr, .. } => {
+                address_expr.as_mut().map(|(sym_addr, deref_meta)| {
+                    *sym_addr = self.make_relative(*sym_addr);
+                    match deref_meta {
+                        SymbolicAddressDereferenceMetadata::KnownBoundDataAvailable {
+                            bound_type, min_addr, max_addr, touched_data_concrete, touched_data_symbolic
+                        } => {
+                            for expr in touched_data_symbolic {
+                                if let Some(expr) = expr {
+                                    *expr = self.make_relative(*expr);
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
+                });
+                value_read_expr.as_mut().map(|x| *x = self.make_relative(*x));
 
                 // TODO: figure out how to handle the case where address is symbolic but data is not (e.g. lookup table)
                 // this leads to a situation where the data is not written to the trace, but the address is
                 // and requires us to know the possible values being read.
-
-                // for now, only return a symbolic expression if the data is symbolic (value_read is Some)
-                if value_read.is_some() {
-                    self.id_counter += 1;
-                }
             }
             SymExpr::MemoryWrite { symbolic_address, written_value, .. } => {
                 symbolic_address.as_mut().map(|x| *x = self.make_relative(*x));
                 written_value.as_mut().map(|x| *x = self.make_relative(*x));
-                // here we increment the counter because reads can be served via the ID of the write
-                // where they were created (also, in symbolic memory models, this usually creates a
-                // new memory model expression). Otherwise, it simply doesn't mean anything and you
-                // can just error out if it ever gets referenced.
-                self.id_counter += 1;
             }
             SymExpr::MemSet { symbolic_address, symbolic_value, symbolic_size, .. } => {
                 symbolic_address.as_mut().map(|x| *x = self.make_relative(*x));
                 symbolic_value.as_mut().map(|x| *x = self.make_relative(*x));
                 symbolic_size.as_mut().map(|x| *x = self.make_relative(*x));
-                // same reason, this stores, so increment counter
-                self.id_counter += 1;
             }
             SymExpr::MemCopy { symbolic_dest, symbolic_src, symbolic_size, .. } => {
                 symbolic_dest.as_mut().map(|x| *x = self.make_relative(*x));
                 symbolic_src.as_mut().map(|x| *x = self.make_relative(*x));
                 symbolic_size.as_mut().map(|x| *x = self.make_relative(*x));
-                // same reason, this stores, so increment counter
-                self.id_counter += 1;
             }
             SymExpr::MemMove { symbolic_dest, symbolic_src, symbolic_size, .. } => {
                 symbolic_dest.as_mut().map(|x| *x = self.make_relative(*x));
                 symbolic_src.as_mut().map(|x| *x = self.make_relative(*x));
                 symbolic_size.as_mut().map(|x| *x = self.make_relative(*x));
-                // same reason, this stores, so increment counter
-                self.id_counter += 1;
             }
             SymExpr::SetParameter { expr, .. } => {
                 *expr = self.make_relative(*expr);
@@ -471,6 +494,9 @@ impl<W: Write + Seek> MessageFileWriter<W> {
                 }
             }
             SymExpr::Call { .. } | SymExpr::Return { .. } | SymExpr::BasicBlock { .. } => {}
+        }
+        if message.is_expression() {
+            self.id_counter += 1;
         }
         self.serialization_options
             .serialize_into(&mut self.writer, &message)?;
@@ -487,7 +513,7 @@ mod serialization_tests {
     use alloc::vec::Vec;
     use std::io::Cursor;
 
-    use super::{MessageFileReader, MessageFileWriter, SymExpr};
+    use super::{MessageFileReader, BinaryMessageWriter, SymExpr};
 
     /// This test intends to ensure that the serialization format can efficiently encode the required information.
     /// This is mainly useful to fail if any changes should be made in the future that (inadvertently) reduce
@@ -497,7 +523,7 @@ mod serialization_tests {
         let mut buf = Vec::new();
         {
             let mut cursor = Cursor::new(&mut buf);
-            let mut writer = MessageFileWriter::from_writer(&mut cursor).unwrap();
+            let mut writer = BinaryMessageWriter::from_writer(&mut cursor).unwrap();
             let a = writer.write_message(SymExpr::True).unwrap();
             let b = writer.write_message(SymExpr::True).unwrap();
             writer.write_message(SymExpr::And { a, b }).unwrap();
@@ -512,14 +538,14 @@ mod serialization_tests {
         assert_eq!(buf.len(), expected_size);
     }
 
-    /// This test intends to verify that a trace written by [`MessageFileWriter`] can indeed be read back by
+    /// This test intends to verify that a trace written by [`BinaryMessageWriter`] can indeed be read back by
     /// [`MessageFileReader`].
     #[test]
     fn serialization_roundtrip() {
         let mut buf = Vec::new();
         {
             let mut cursor = Cursor::new(&mut buf);
-            let mut writer = MessageFileWriter::from_writer(&mut cursor).unwrap();
+            let mut writer = BinaryMessageWriter::from_writer(&mut cursor).unwrap();
             let a = writer.write_message(SymExpr::True).unwrap();
             let b = writer.write_message(SymExpr::True).unwrap();
             writer.write_message(SymExpr::And { a, b }).unwrap();
@@ -564,7 +590,7 @@ impl<'buffer> MessageFileReader<Cursor<&'buffer [u8]>> {
     }
 
     /// Creates a new `MessageFileReader` from the given buffer, expecting the contained trace to be prefixed by the
-    /// trace length (as generated by the [`MessageFileWriter`]).
+    /// trace length (as generated by the [`BinaryMessageWriter`]).
     /// See also [`MessageFileReader::from_buffer`].
     pub fn from_length_prefixed_buffer(mut buffer: &'buffer [u8]) -> io::Result<Self> {
         let mut len_buf = 0_u64.to_le_bytes();
@@ -585,15 +611,15 @@ impl<'buffer> MessageFileReader<Cursor<&'buffer [u8]>> {
     }
 }
 
-impl<T: ShMem> MessageFileWriter<ShMemCursor<T>> {
-    /// Creates a new `MessageFileWriter` from the given [`ShMemCursor`].
+impl<T: ShMem> BinaryMessageWriter<ShMemCursor<T>> {
+    /// Creates a new `BinaryMessageWriter` from the given [`ShMemCursor`].
     pub fn from_shmem(shmem: T) -> io::Result<Self> {
         Self::from_writer(ShMemCursor::new(shmem))
     }
 }
 
-impl MessageFileWriter<ShMemCursor<<StdShMemProvider as ShMemProvider>::ShMem>> {
-    /// Creates a new `MessageFileWriter` by reading a [`ShMem`] from the given environment variable.
+impl BinaryMessageWriter<ShMemCursor<<StdShMemProvider as ShMemProvider>::ShMem>> {
+    /// Creates a new `BinaryMessageWriter` by reading a [`ShMem`] from the given environment variable.
     pub fn from_stdshmem_env_with_name(env_name: impl AsRef<str>) -> io::Result<Self> {
         Self::from_shmem(
             StdShMemProvider::new()
@@ -603,12 +629,12 @@ impl MessageFileWriter<ShMemCursor<<StdShMemProvider as ShMemProvider>::ShMem>> 
         )
     }
 
-    /// Creates a new `MessageFileWriter` by reading a [`ShMem`] using [`DEFAULT_ENV_NAME`].
+    /// Creates a new `BinaryMessageWriter` by reading a [`ShMem`] using [`DEFAULT_ENV_NAME`].
     pub fn from_stdshmem_default_env() -> io::Result<Self> {
         Self::from_stdshmem_env_with_name(DEFAULT_ENV_NAME)
     }
 }
 
 /// A writer that will write messages to a shared memory buffer.
-pub type StdShMemMessageFileWriter =
-    MessageFileWriter<ShMemCursor<<StdShMemProvider as ShMemProvider>::ShMem>>;
+pub type StdShMemBinaryMessageWriter =
+    BinaryMessageWriter<ShMemCursor<<StdShMemProvider as ShMemProvider>::ShMem>>;

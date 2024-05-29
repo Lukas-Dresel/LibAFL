@@ -73,6 +73,24 @@ fn main() {
             write_symcc_rename_header(&rename_header_path, &cpp_bindings);
             build_and_link_symcc_runtime(&symcc_src_path, &rename_header_path);
         }
+        let bindings = bindgen::Builder::default()
+            // .clang_args(["-x", "c++", "-std=c++17"].iter())
+            .header(
+                symcc_src_path
+                .join("runtime")
+                .join("rust_backend")
+                .join("RustInterface.h")
+                .to_str().unwrap()
+            )
+            .generate()
+            // Unwrap the Result and panic on failure.
+            .expect("Unable to generate bindings");
+
+        // Write the bindings to the $OUT_DIR/bindings.rs file.
+        let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+        bindings
+            .write_to_file(out_path.join("interface.rs"))
+            .expect("Couldn't write bindings!");
     } else {
         println!("cargo:warning=Building SymCC is only supported on Linux");
     }

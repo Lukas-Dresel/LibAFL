@@ -58,6 +58,33 @@ impl From<usize> for Location {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[allow(missing_docs)]
+pub enum BoundType {
+    Exact,
+    OverApproximate,
+    UnderApproximate,
+}
+
+#[cfg(feature = "std")]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[allow(missing_docs)]
+pub enum SymbolicAddressDereferenceMetadata {
+    KnownBoundDataAvailable {
+        bound_type: BoundType,
+        min_addr: usize,
+        max_addr: usize,
+        touched_data_concrete: Vec<u8>,
+        touched_data_symbolic: Vec<Option<SymExprRef>>,
+    },
+    KnownBoundDataUnavailable {
+        bound_type: BoundType,
+        min_addr: usize,
+        max_addr: usize,
+    },
+    UnknownBound
+}
+
 /// `SymExpr` represents a message in the serialization format.
 /// The messages in the format are a perfect mirror of the methods that are called on the runtime during execution.
 #[cfg(feature = "std")]
@@ -360,10 +387,10 @@ pub enum SymExpr {
         location: Location,
     },
 
-    MemoryRead {
-        address_expr: Option<SymExprRef>,
-        value_read: Option<SymExprRef>,
-        concrete_address: usize,
+    SymbolicMemoryRead {
+        address_expr: Option<(SymExprRef, SymbolicAddressDereferenceMetadata)>,
+        value_read_expr: Option<SymExprRef>,
+        address_concrete: usize,
         length: usize,
         little_endian: bool,
     },
@@ -424,6 +451,38 @@ pub enum SymExpr {
     BasicBlock {
         location: Location,
     },
+}
+
+impl SymExpr {
+    /// Returns whether or not a given expression should be considered
+    /// a value. This is used to determine if a given message should increase
+    /// the expression id counter.
+    pub fn is_expression(&self) -> bool {
+        match self {
+            SymExpr::SetParameter { .. }
+            | SymExpr::SetReturnValue { .. }
+            | SymExpr::ConcretizePointer { .. }
+            | SymExpr::ConcretizeSize { .. }
+            | SymExpr::BasicBlock { .. }
+            | SymExpr::Call {..}
+            | SymExpr::Return { .. }
+            | SymExpr::PathConstraint { .. }
+            | SymExpr::ExpressionsUnreachable { .. } => false,
+
+            // we consider these expresions because reads can be served via the ID of the write
+            // where they were created (also, in symbolic memory models, this usually creates a
+            // new memory model expression). Otherwise, it simply doesn't mean anything and you
+            // can just error out if it ever gets referenced.
+            SymExpr::MemCopy {..}
+            | SymExpr::MemMove {..}
+            | SymExpr::MemSet {..}
+            | SymExpr::MemoryWrite { .. }
+                => true,
+
+
+            _ => true,
+        }
+    }
 }
 
 #[cfg(feature = "std")]
