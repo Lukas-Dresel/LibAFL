@@ -259,8 +259,11 @@ fn build_and_link_symcc_runtime(symcc_src_path: &Path, rename_header_path: &Path
         .build()
         .join("lib");
     link_with_cpp_stdlib();
+    if !cpp_lib.join("SymRuntimeStatic.a").exists() {
+        panic!("SymCC runtime build failed: {}", cpp_lib.display());
+    }
     println!("cargo:rustc-link-search=native={}", cpp_lib.display());
-    println!("cargo:rustc-link-lib=static=SymRuntime");
+    println!("cargo:rustc-link-lib=static=SymRuntimeStatic");
 }
 
 fn link_with_cpp_stdlib() {
