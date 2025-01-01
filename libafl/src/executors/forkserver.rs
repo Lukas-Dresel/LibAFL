@@ -24,6 +24,8 @@ use nix::{
     unistd::Pid,
 };
 
+use crate::prelude::std::cmp::min;
+
 #[cfg(feature = "regex")]
 use crate::observers::{get_asan_runtime_flags_with_log_path, AsanBacktraceObserver};
 use crate::{
@@ -420,12 +422,10 @@ where
     }
 }
 
-impl<E, EM, Z> Executor<EM, Z> for TimeoutForkserverExecutor<E>
+impl<E> TimeoutForkserverExecutor<E>
 where
-    E: Executor<EM, Z> + HasForkserver + HasObservers + Debug,
+    E: HasForkserver + HasObservers + UsesObservers + Debug,
     E::Input: HasTargetBytes,
-    EM: UsesState<State = E::State>,
-    Z: UsesState<State = E::State>,
 {
     #[inline]
     pub fn execute_input(
@@ -520,7 +520,7 @@ where
 
 impl<E, EM, Z> Executor<EM, Z> for TimeoutForkserverExecutor<E>
 where
-    E: Executor<EM, Z> + HasForkserver + Debug,
+    E: Executor<EM, Z> + HasForkserver + Debug + HasObservers + UsesObservers,
     E::Input: HasTargetBytes,
     EM: UsesState<State = E::State>,
     Z: UsesState<State = E::State>,
@@ -1103,14 +1103,12 @@ impl<'a> Default for ForkserverExecutorBuilder<'a, UnixShMemProvider> {
     }
 }
 
-impl<EM, OT, S, SP, Z> Executor<EM, Z> for ForkserverExecutor<OT, S, SP>
+impl<OT, S, SP> ForkserverExecutor<OT, S, SP>
 where
     OT: ObserversTuple<S>,
     SP: ShMemProvider,
     S: UsesInput,
-    S::Input: HasTargetBytes,
-    EM: UsesState<State = S>,
-    Z: UsesState<State = S>,
+    S::Input: HasTargetBytes
 {
     #[inline]
     pub fn execute_input(
