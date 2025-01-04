@@ -4,7 +4,7 @@
 /// The URL of the `LibAFL` `SymCC` fork.
 pub const SYMCC_REPO_URL: &str = "https://github.com/Lukas-Dresel/symcc.git";
 /// The commit of the `LibAFL` `SymCC` fork.
-pub const SYMCC_REPO_COMMIT: &str = "main";
+pub const SYMCC_REPO_COMMIT: &str = "eeb643b0462edaf54c21077e9aaa28e86e932559";
 
 #[cfg(feature = "clone")]
 mod clone {
