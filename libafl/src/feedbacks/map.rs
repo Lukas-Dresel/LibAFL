@@ -4,13 +4,12 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-#[rustversion::nightly]
-use core::simd::SimdOrd;
 use core::{
     fmt::Debug,
     marker::PhantomData,
     ops::{BitAnd, BitOr},
 };
+use core::simd::cmp::SimdOrd;
 
 use libafl_bolts::{AsIter, AsMutSlice, AsSlice, HasRefCnt, Named};
 use num_traits::PrimInt;
@@ -515,6 +514,9 @@ where
         // 128 bits vectors
         type VectorType = core::simd::u8x16;
 
+        // the number of lanes in the vector type
+        const LANES: usize = 16;
+
         let mut interesting = false;
         // TODO Replace with match_name_type when stable
         let observer = observers.match_name::<O>(&self.observer_name).unwrap();
@@ -547,20 +549,20 @@ where
             }
         }*/
 
-        let steps = size / VectorType::LANES;
-        let left = size % VectorType::LANES;
+        let steps = size / LANES;
+        let left = size % LANES;
 
         if let Some(novelties) = self.novelties.as_mut() {
             novelties.clear();
             for step in 0..steps {
-                let i = step * VectorType::LANES;
+                let i = step * LANES;
                 let history = VectorType::from_slice(&history_map[i..]);
                 let items = VectorType::from_slice(&map[i..]);
 
                 if items.simd_max(history) != history {
                     interesting = true;
                     unsafe {
-                        for j in i..(i + VectorType::LANES) {
+                        for j in i..(i + LANES) {
                             let item = *map.get_unchecked(j);
                             if item > *history_map.get_unchecked(j) {
                                 novelties.push(j);
@@ -581,7 +583,7 @@ where
             }
         } else {
             for step in 0..steps {
-                let i = step * VectorType::LANES;
+                let i = step * LANES;
                 let history = VectorType::from_slice(&history_map[i..]);
                 let items = VectorType::from_slice(&map[i..]);
 
