@@ -114,7 +114,7 @@ fn report_error_and_exit(status: i32) -> Result<(), Error> {
 
 /// The length of header bytes which tells shmem size
 const SHMEM_FUZZ_HDR_SIZE: usize = 4;
-const MAX_INPUT_SIZE_DEFAULT: usize = 1024 * 1024;
+const MAX_INPUT_SIZE_DEFAULT: usize = 1024 * 1024 * 1024;
 const MIN_INPUT_SIZE_DEFAULT: usize = 1;
 
 /// The default signal to use to kill child processes
@@ -1449,10 +1449,10 @@ where
             map.as_slice_mut()[..SHMEM_FUZZ_HDR_SIZE]
                 .copy_from_slice(&input_size_in_bytes[..SHMEM_FUZZ_HDR_SIZE]);
             map.as_slice_mut()[SHMEM_FUZZ_HDR_SIZE..(SHMEM_FUZZ_HDR_SIZE + input_size)]
-                .copy_from_slice(&input_bytes.as_slice()[..input_size]);
+                .copy_from_slice(&input_bytes.as_slice()[..min(input_size, MAX_FILE - SHMEM_FUZZ_HDR_SIZE)]);
         } else {
             self.input_file
-                .write_buf(&input_bytes.as_slice()[..input_size])?;
+                .write_buf(&input_bytes.as_slice()[..min(input_size, MAX_FILE - SHMEM_FUZZ_HDR_SIZE)])?;
         }
 
         let send_len = self.forkserver.write_ctl(last_run_timed_out)?;
