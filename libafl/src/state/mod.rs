@@ -14,17 +14,15 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+#[cfg(feature = "std")]
+use itertools::Itertools;
 
-<<<<<<< HEAD
 #[cfg(feature = "std")]
 use libafl_bolts::core_affinity::{CoreId, Cores};
 use libafl_bolts::{
     rands::{Rand, StdRand},
     serdeany::{NamedSerdeAnyMap, SerdeAnyMap},
 };
-=======
-use itertools::Itertools;
->>>>>>> f5bdfad8 (deterministic load order of the initial inputs)
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 mod stack;
