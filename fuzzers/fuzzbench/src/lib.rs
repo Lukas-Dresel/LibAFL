@@ -18,7 +18,7 @@ use clap::{Arg, Command};
 use libafl::{
     corpus::{Corpus, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::SimpleRestartingEventManager,
-    executors::{inprocess::InProcessExecutor, ExitKind},
+    executors::{inprocess::{InProcessExecutor, TimeoutInProcessForkExecutor}, ExitKind},
     feedback_or,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback},
     fuzzer::{Fuzzer, StdFuzzer},
@@ -58,6 +58,9 @@ use nix::{self, unistd::dup};
 /// The fuzzer main (as `no_mangle` C function)
 #[no_mangle]
 pub extern "C" fn libafl_main() {
+
+    env_logger::init();
+
     // Registry the metadata types used in this fuzzer
     // Needed only on no_std
     // unsafe { RegistryBuilder::register::<Tokens>(); }
@@ -207,7 +210,7 @@ fn fuzz(
 
     #[cfg(unix)]
     let mut stdout_cpy = unsafe {
-        let new_fd = dup(io::stdout().as_raw_fd())?;
+        let new_fd = dup(io::stdout().as_raw_fd()).expect("Failed to dup stdout");
         File::from_raw_fd(new_fd)
     };
     #[cfg(unix)]
@@ -224,9 +227,9 @@ fn fuzz(
 
     // We need a shared map to store our state before a crash.
     // This way, we are able to continue fuzzing afterwards.
-    let mut shmem_provider = StdShMemProvider::new()?;
+    let mut restore_shmem_provider = StdShMemProvider::new()?;
 
-    let (state, mut mgr) = match SimpleRestartingEventManager::launch(monitor, &mut shmem_provider)
+    let (state, mut mgr) = match SimpleRestartingEventManager::launch(monitor, &mut restore_shmem_provider)
     {
         // The restarting state will spawn the same process again as child, then restarted it each time it crashes.
         Ok(res) => res,
@@ -239,6 +242,8 @@ fn fuzz(
             }
         },
     };
+
+    let mut coverage_shmem_provider = StdShMemProvider::new()?;
 
     // Create an observation channel using the coverage map
     // We don't use the hitcounts (see the Cargo.toml, we use pcguard_edges)
@@ -327,24 +332,26 @@ fn fuzz(
     let mut tracing_harness = harness;
 
     // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
-    let mut executor = InProcessExecutor::with_timeout(
+    let mut executor = TimeoutInProcessForkExecutor::new(
         &mut harness,
         tuple_list!(edges_observer, time_observer),
         &mut fuzzer,
         &mut state,
         &mut mgr,
         timeout,
+        coverage_shmem_provider.clone(),
     )?;
 
     // Setup a tracing stage in which we log comparisons
     let tracing = TracingStage::new(
-        InProcessExecutor::with_timeout(
+        TimeoutInProcessForkExecutor::new(
             &mut tracing_harness,
             tuple_list!(cmplog_observer),
             &mut fuzzer,
             &mut state,
             &mut mgr,
             timeout * 10,
+            coverage_shmem_provider,
         )?,
         // Give it more time!
     );
