@@ -16,9 +16,23 @@ use std::{
 
 use clap::{Arg, Command};
 use libafl::{
+<<<<<<< HEAD
     corpus::{Corpus, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::SimpleRestartingEventManager,
     executors::{inprocess::{InProcessExecutor, TimeoutInProcessForkExecutor}, ExitKind},
+=======
+    bolts::{
+        current_nanos, current_time,
+        os::dup2,
+        rands::StdRand,
+        shmem::{ShMemProvider, StdShMemProvider},
+        tuples::{tuple_list, Merge},
+        AsSlice,
+    },
+    corpus::{Corpus, OnDiskCorpus},
+    events::SimpleRestartingEventManager,
+    executors::{inprocess::InProcessExecutor, ExitKind, TimeoutExecutor},
+>>>>>>> parent of 416a3b0f (removed fuzzers)
     feedback_or,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback},
     fuzzer::{Fuzzer, StdFuzzer},
@@ -39,6 +53,7 @@ use libafl::{
     state::{HasCorpus, HasMetadata, StdState},
     Error,
 };
+<<<<<<< HEAD
 use libafl_bolts::{
     current_nanos, current_time,
     os::dup2,
@@ -47,6 +62,8 @@ use libafl_bolts::{
     tuples::{tuple_list, Merge},
     AsSlice,
 };
+=======
+>>>>>>> parent of 416a3b0f (removed fuzzers)
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use libafl_targets::autotokens;
 use libafl_targets::{
@@ -57,6 +74,7 @@ use nix::{self, unistd::dup};
 
 /// The fuzzer main (as `no_mangle` C function)
 #[no_mangle]
+<<<<<<< HEAD
 pub extern "C" fn libafl_main() {
 
     env_logger::init();
@@ -64,6 +82,12 @@ pub extern "C" fn libafl_main() {
     // Registry the metadata types used in this fuzzer
     // Needed only on no_std
     // unsafe { RegistryBuilder::register::<Tokens>(); }
+=======
+pub fn libafl_main() {
+    // Registry the metadata types used in this fuzzer
+    // Needed only on no_std
+    //RegistryBuilder::register::<Tokens>();
+>>>>>>> parent of 416a3b0f (removed fuzzers)
 
     let res = match Command::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
@@ -210,7 +234,11 @@ fn fuzz(
 
     #[cfg(unix)]
     let mut stdout_cpy = unsafe {
+<<<<<<< HEAD
         let new_fd = dup(io::stdout().as_raw_fd()).expect("Failed to dup stdout");
+=======
+        let new_fd = dup(io::stdout().as_raw_fd())?;
+>>>>>>> parent of 416a3b0f (removed fuzzers)
         File::from_raw_fd(new_fd)
     };
     #[cfg(unix)]
@@ -227,9 +255,15 @@ fn fuzz(
 
     // We need a shared map to store our state before a crash.
     // This way, we are able to continue fuzzing afterwards.
+<<<<<<< HEAD
     let mut restore_shmem_provider = StdShMemProvider::new()?;
 
     let (state, mut mgr) = match SimpleRestartingEventManager::launch(monitor, &mut restore_shmem_provider)
+=======
+    let mut shmem_provider = StdShMemProvider::new()?;
+
+    let (state, mut mgr) = match SimpleRestartingEventManager::launch(monitor, &mut shmem_provider)
+>>>>>>> parent of 416a3b0f (removed fuzzers)
     {
         // The restarting state will spawn the same process again as child, then restarted it each time it crashes.
         Ok(res) => res,
@@ -243,8 +277,11 @@ fn fuzz(
         },
     };
 
+<<<<<<< HEAD
     let mut coverage_shmem_provider = StdShMemProvider::new()?;
 
+=======
+>>>>>>> parent of 416a3b0f (removed fuzzers)
     // Create an observation channel using the coverage map
     // We don't use the hitcounts (see the Cargo.toml, we use pcguard_edges)
     let edges_observer = HitcountsMapObserver::new(unsafe { std_edges_map_observer("edges") });
@@ -254,7 +291,11 @@ fn fuzz(
 
     let cmplog_observer = CmpLogObserver::new("cmplog", true);
 
+<<<<<<< HEAD
     let map_feedback = MaxMapFeedback::tracking(&edges_observer, true, false);
+=======
+    let map_feedback = MaxMapFeedback::new_tracking(&edges_observer, true, false);
+>>>>>>> parent of 416a3b0f (removed fuzzers)
 
     let calibration = CalibrationStage::new(&map_feedback);
 
@@ -276,7 +317,11 @@ fn fuzz(
             // RNG
             StdRand::with_seed(current_nanos()),
             // Corpus that will be evolved, we keep it in memory for performance
+<<<<<<< HEAD
             InMemoryOnDiskCorpus::new(corpus_dir).unwrap(),
+=======
+            OnDiskCorpus::new(corpus_dir).unwrap(),
+>>>>>>> parent of 416a3b0f (removed fuzzers)
             // Corpus in which we store solutions (crashes in this example),
             // on disk so the user can get them after stopping the fuzzer
             OnDiskCorpus::new(objective_dir).unwrap(),
@@ -309,6 +354,7 @@ fn fuzz(
         5,
     )?;
 
+<<<<<<< HEAD
     let power = StdPowerMutationalStage::new(mutator);
 
     // A minimization+queue policy to get testcasess from the corpus
@@ -316,6 +362,13 @@ fn fuzz(
         &mut state,
         &edges_observer,
         Some(PowerSchedule::FAST),
+=======
+    let power = StdPowerMutationalStage::new(mutator, &edges_observer);
+
+    // A minimization+queue policy to get testcasess from the corpus
+    let scheduler = IndexesLenTimeMinimizerScheduler::new(StdWeightedScheduler::with_schedule(
+        PowerSchedule::EXPLORE,
+>>>>>>> parent of 416a3b0f (removed fuzzers)
     ));
 
     // A fuzzer with feedbacks and a corpus scheduler
@@ -332,6 +385,7 @@ fn fuzz(
     let mut tracing_harness = harness;
 
     // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
+<<<<<<< HEAD
     let mut executor = TimeoutInProcessForkExecutor::new(
         &mut harness,
         tuple_list!(edges_observer, time_observer),
@@ -345,22 +399,49 @@ fn fuzz(
     // Setup a tracing stage in which we log comparisons
     let tracing = TracingStage::new(
         TimeoutInProcessForkExecutor::new(
+=======
+    let mut executor = TimeoutExecutor::new(
+        InProcessExecutor::new(
+            &mut harness,
+            tuple_list!(edges_observer, time_observer),
+            &mut fuzzer,
+            &mut state,
+            &mut mgr,
+        )?,
+        timeout,
+    );
+
+    // Setup a tracing stage in which we log comparisons
+    let tracing = TracingStage::new(TimeoutExecutor::new(
+        InProcessExecutor::new(
+>>>>>>> parent of 416a3b0f (removed fuzzers)
             &mut tracing_harness,
             tuple_list!(cmplog_observer),
             &mut fuzzer,
             &mut state,
             &mut mgr,
+<<<<<<< HEAD
             timeout * 10,
             coverage_shmem_provider,
         )?,
         // Give it more time!
     );
+=======
+        )?,
+        // Give it more time!
+        timeout * 10,
+    ));
+>>>>>>> parent of 416a3b0f (removed fuzzers)
 
     // The order of the stages matter!
     let mut stages = tuple_list!(calibration, tracing, i2s, power);
 
     // Read tokens
+<<<<<<< HEAD
     if state.metadata_map().get::<Tokens>().is_none() {
+=======
+    if state.metadata().get::<Tokens>().is_none() {
+>>>>>>> parent of 416a3b0f (removed fuzzers)
         let mut toks = Tokens::default();
         if let Some(tokenfile) = tokenfile {
             toks.add_from_file(tokenfile)?;
@@ -386,14 +467,22 @@ fn fuzz(
         println!("We imported {} inputs from disk.", state.corpus().count());
     }
 
+<<<<<<< HEAD
     // Remove target output (logs still survive)
+=======
+    // Remove target ouput (logs still survive)
+>>>>>>> parent of 416a3b0f (removed fuzzers)
     #[cfg(unix)]
     {
         let null_fd = file_null.as_raw_fd();
         dup2(null_fd, io::stdout().as_raw_fd())?;
+<<<<<<< HEAD
         if std::env::var("LIBAFL_FUZZBENCH_DEBUG").is_err() {
             dup2(null_fd, io::stderr().as_raw_fd())?;
         }
+=======
+        dup2(null_fd, io::stderr().as_raw_fd())?;
+>>>>>>> parent of 416a3b0f (removed fuzzers)
     }
     // reopen file to make sure we're at the end
     log.replace(OpenOptions::new().append(true).create(true).open(logfile)?);

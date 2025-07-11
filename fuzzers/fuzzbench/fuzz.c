@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdlib.h>
+<<<<<<< HEAD
 #include <string.h>
 #include <stdio.h>
 
@@ -11,6 +12,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
 
   if (memcmp(Data, buf, 4) == 0) { abort(); }
   printf("Finished processing input.\n");
+=======
+
+int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+  if (Size >= 8 && *(uint32_t *)Data == 0xaabbccdd) { abort(); }
+>>>>>>> parent of 416a3b0f (removed fuzzers)
   return 0;
 }
 

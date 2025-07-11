@@ -1,6 +1,10 @@
 use std::env;
 
+<<<<<<< HEAD
 use libafl_cc::{ClangWrapper, CompilerWrapper, LLVMPasses, ToolWrapper};
+=======
+use libafl_cc::{ClangWrapper, CompilerWrapper, LLVMPasses};
+>>>>>>> parent of 416a3b0f (removed fuzzers)
 
 pub fn main() {
     let mut args: Vec<String> = env::args().collect();
