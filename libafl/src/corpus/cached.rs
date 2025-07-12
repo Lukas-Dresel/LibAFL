@@ -47,7 +47,7 @@ where
         id: CorpusId,
     ) -> Result<(), Error> {
         if testcase.borrow().input().is_none() {
-            self.load_input_into(&mut testcase.borrow_mut())?;
+            // self.load_input_into(&mut testcase.borrow_mut())?;
             let mut borrowed_num = 0;
             while self.cached_indexes.borrow().len() >= self.cache_max_len {
                 let removed = self.cached_indexes.borrow_mut().pop_front().unwrap();
