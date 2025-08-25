@@ -32,6 +32,13 @@ pub type SymExprRef = NonZeroUsize;
 #[repr(transparent)]
 pub struct Location(usize);
 
+impl Location {
+    /// Creates a location from a pointer-sized value. Can be used at compile time to create static consts.
+    pub const fn constant(value: usize) -> Self {
+        Self(value)
+    }
+}
+
 impl Debug for Location {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         Debug::fmt(&self.0, f)
@@ -56,11 +63,38 @@ impl From<usize> for Location {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Encode, Decode)]
+#[allow(missing_docs)]
+pub enum BoundType {
+    Exact,
+    OverApproximate,
+    UnderApproximate,
+}
+
+#[cfg(feature = "std")]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Encode, Decode)]
+#[allow(missing_docs)]
+pub enum SymbolicAddressDereferenceMetadata {
+    KnownBoundDataAvailable {
+        bound_type: BoundType,
+        min_addr: usize,
+        max_addr: usize,
+        touched_data_concrete: Vec<u8>,
+        touched_data_symbolic: Vec<Option<SymExprRef>>,
+    },
+    KnownBoundDataUnavailable {
+        bound_type: BoundType,
+        min_addr: usize,
+        max_addr: usize,
+    },
+    UnknownBound
+}
+
 /// `SymExpr` represents a message in the serialization format.
 /// The messages in the format are a perfect mirror of the methods that are called on the runtime during execution.
 #[cfg(feature = "std")]
 #[allow(missing_docs)]
-#[derive(Serialize, Deserialize, Debug, PartialEq, Encode, Decode)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Encode, Decode, Clone)]
 pub enum SymExpr {
     InputByte {
         offset: usize,
@@ -369,6 +403,179 @@ pub enum SymExpr {
     BasicBlock {
         location: Location,
     },
+
+    ConcretizePointer {
+        expr: SymExprRef,
+        value: usize,
+        location: Location,
+    },
+
+    ConcretizeSize {
+        expr: SymExprRef,
+        value: usize,
+        location: Location,
+    },
+
+    SymbolicMemoryRead {
+        address_expr: Option<(SymExprRef, SymbolicAddressDereferenceMetadata)>,
+        value_read_expr: Option<SymExprRef>,
+        address_concrete: usize,
+        length: usize,
+        little_endian: bool,
+    },
+    MemoryWrite {
+        symbolic_address: Option<SymExprRef>,
+        written_value: Option<SymExprRef>,
+        concrete_address: usize,
+        size: usize,
+        little_endian: bool,
+    },
+    MemSet {
+        symbolic_address: Option<SymExprRef>,
+        symbolic_value: Option<SymExprRef>,
+        symbolic_size: Option<SymExprRef>,
+        concrete_address: usize,
+        concrete_value: u8,
+        concrete_size: usize,
+    },
+    MemCopy {
+        symbolic_dest: Option<SymExprRef>,
+        symbolic_src: Option<SymExprRef>,
+        symbolic_size: Option<SymExprRef>,
+        concrete_dest: usize,
+        concrete_src: usize,
+        concrete_size: usize,
+    },
+    MemMove {
+        symbolic_dest: Option<SymExprRef>,
+        symbolic_src: Option<SymExprRef>,
+        symbolic_size: Option<SymExprRef>,
+        concrete_dest: usize,
+        concrete_src: usize,
+        concrete_size: usize,
+    },
+
+    SetParameter {
+        index: u8,
+        expr: SymExprRef,
+    },
+    SetReturnValue {
+        expr: SymExprRef,
+    },
+}
+
+impl SymExpr {
+    /// Returns whether or not a given expression should be considered
+    /// a value. This is used to determine if a given message should increase
+    /// the expression id counter.
+    pub fn is_expression(&self) -> bool {
+        use SymExpr::*;
+
+        match self {
+            // ────────────────────────────────────────
+            // Variants that do *not* create a new expr
+            // ────────────────────────────────────────
+            SetParameter { .. }
+            | SetReturnValue { .. }
+            | ConcretizePointer { .. }
+            | ConcretizeSize { .. }
+            | BasicBlock { .. }
+            | Call { .. }
+            | Return { .. }
+            | PathConstraint { .. }
+            | ExpressionsUnreachable { .. } => false,
+
+            // ────────────────────────────────────────
+            // Memory-related ops that *do* create exprs
+            // ────────────────────────────────────────
+            //
+            // We consider these expressions because reads can be served via the ID of the write
+            // where they were created (also, in symbolic memory models, this usually creates a
+            // new memory model expression). Otherwise, it simply doesn't mean anything and you
+            // can just error out if it ever gets referenced.
+            MemCopy { .. }
+            | MemMove { .. }
+            | MemSet  { .. }
+            | MemoryWrite { .. }
+            | SymbolicMemoryRead { .. } => true,
+
+            // ────────────────────────────────────────
+            // Everything else produces a value
+            // ────────────────────────────────────────
+            InputByte { .. }
+            | Integer { .. }
+            | Integer128 { .. }
+            | IntegerFromBuffer { .. }
+            | Float { .. }
+            | NullPointer
+            | True
+            | False
+            | Bool { .. }
+            | Neg { .. }
+            | Add { .. }
+            | Sub { .. }
+            | Mul { .. }
+            | UnsignedDiv { .. }
+            | SignedDiv { .. }
+            | UnsignedRem { .. }
+            | SignedRem { .. }
+            | ShiftLeft { .. }
+            | LogicalShiftRight { .. }
+            | ArithmeticShiftRight { .. }
+            | SignedLessThan { .. }
+            | SignedLessEqual { .. }
+            | SignedGreaterThan { .. }
+            | SignedGreaterEqual { .. }
+            | UnsignedLessThan { .. }
+            | UnsignedLessEqual { .. }
+            | UnsignedGreaterThan { .. }
+            | UnsignedGreaterEqual { .. }
+            | Not { .. }
+            | Equal { .. }
+            | NotEqual { .. }
+            | BoolAnd { .. }
+            | BoolOr { .. }
+            | BoolXor { .. }
+            | And { .. }
+            | Or { .. }
+            | Xor { .. }
+            | FloatOrdered { .. }
+            | FloatOrderedGreaterThan { .. }
+            | FloatOrderedGreaterEqual { .. }
+            | FloatOrderedLessThan { .. }
+            | FloatOrderedLessEqual { .. }
+            | FloatOrderedEqual { .. }
+            | FloatOrderedNotEqual { .. }
+            | FloatUnordered { .. }
+            | FloatUnorderedGreaterThan { .. }
+            | FloatUnorderedGreaterEqual { .. }
+            | FloatUnorderedLessThan { .. }
+            | FloatUnorderedLessEqual { .. }
+            | FloatUnorderedEqual { .. }
+            | FloatUnorderedNotEqual { .. }
+            | FloatNeg { .. }
+            | FloatAbs { .. }
+            | FloatAdd { .. }
+            | FloatSub { .. }
+            | FloatMul { .. }
+            | FloatDiv { .. }
+            | FloatRem { .. }
+            | Ite { .. }
+            | Sext { .. }
+            | Zext { .. }
+            | Trunc { .. }
+            | IntToFloat { .. }
+            | FloatToFloat { .. }
+            | BitsToFloat { .. }
+            | FloatToBits { .. }
+            | FloatToSignedInteger { .. }
+            | FloatToUnsignedInteger { .. }
+            | BoolToBit { .. }
+            | Concat { .. }
+            | Extract { .. }
+            | Insert { .. } => true,
+        }
+    }
 }
 
 #[cfg(feature = "std")]

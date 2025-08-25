@@ -118,6 +118,11 @@ pub mod target_args;
 #[cfg(feature = "std")]
 pub use target_args::*;
 
+#[cfg(feature = "std")]
+use bincode::{
+    error::{DecodeError, EncodeError},
+};
+
 pub mod simd;
 
 /// The purpose of this module is to alleviate imports of the bolts by adding a glob import.
@@ -617,6 +622,20 @@ impl From<BorrowMutError> for Error {
 #[cfg(feature = "alloc")]
 impl From<postcard::Error> for Error {
     fn from(err: postcard::Error) -> Self {
+        Self::serialize(format!("{err:?}"))
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<EncodeError> for Error {
+    fn from(err: EncodeError) -> Self {
+        Self::serialize(format!("{err:?}"))
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<DecodeError> for Error {
+    fn from(err: DecodeError) -> Self {
         Self::serialize(format!("{err:?}"))
     }
 }

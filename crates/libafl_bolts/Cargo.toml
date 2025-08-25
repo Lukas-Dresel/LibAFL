@@ -53,6 +53,7 @@ std = [
   "serial_test",
   "alloc",
   "simd",
+  "bincode",
 ]
 
 ## Enables all features that allocate in `no_std`
@@ -136,6 +137,8 @@ itertools = "0.14.0"
 libafl_derive = { workspace = true, default-features = true, optional = true }
 static_assertions = { workspace = true }
 typeid = { workspace = true }
+
+bincode = { version = "2.0.1", optional = true, features = ["serde"] }
 
 tuple_list = { version = "0.1.3" }
 hashbrown = { workspace = true, features = [

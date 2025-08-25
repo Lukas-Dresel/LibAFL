@@ -31,7 +31,7 @@ use crate::fuzzer::ExecuteInputResult;
 #[cfg(feature = "introspection")]
 use crate::monitors::stats::ClientPerfStats;
 use crate::{
-    Error, HasMetadata, HasNamedMetadata,
+    Error, common::HasMetadata, HasNamedMetadata,
     corpus::{Corpus, CorpusId, HasCurrentCorpusId, HasTestcase, InMemoryCorpus, Testcase},
     events::{Event, EventFirer, EventWithStats, LogSeverity},
     feedbacks::StateInitializer,
@@ -249,6 +249,27 @@ pub struct StdState<C, I, R, SC> {
     stop_requested: bool,
     stage_stack: StageStack,
     phantom: PhantomData<I>,
+}
+
+
+/// A trait that allows you to easily pull out the most commonly used together fields from a state.
+pub trait BetterStateTrait<I>: HasCorpus<I> + HasRand
+{
+    /// Get mutable references to all important state components simultaneously
+    fn get_state_components_rand_corpus_metadata(&mut self) -> (&mut Self::Rand, &mut Self::Corpus, &mut SerdeAnyMap);
+}
+
+impl<C, I, R, SC> BetterStateTrait<I> for StdState<C, I, R, SC>
+where
+    C: Corpus<I>,
+    I: Input,
+    R: Rand,
+    SC: Corpus<I>,
+    StdState<C, I, R, SC>: HasCorpus<I, Corpus=C>,
+{
+    fn get_state_components_rand_corpus_metadata(&mut self) -> (&mut Self::Rand, &mut Self::Corpus, &mut SerdeAnyMap) {
+        (&mut self.rand, &mut self.corpus, &mut self.metadata)
+    }
 }
 
 impl<C, I, R, SC> HasRand for StdState<C, I, R, SC>

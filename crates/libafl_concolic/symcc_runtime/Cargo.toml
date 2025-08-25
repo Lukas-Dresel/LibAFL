@@ -28,10 +28,16 @@ categories = [
 all-features = true
 
 [features]
+
+default = ["concolic_expression_caching"]
+
 ## skips building and linking the C++ part of the runtime
 no-cpp-runtime = []
 
+concolic_expression_caching = []
+
 [dependencies]
+lru = "*"
 libafl = { workspace = true, features = ["std", "serdeany_autoreg"] }
 libafl_bolts = { workspace = true, features = ["std", "serdeany_autoreg"] }
 

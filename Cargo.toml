@@ -24,6 +24,8 @@ members = [
   "crates/libafl_sugar",
   "crates/libafl_concolic/test/dump_constraints",
   "crates/libafl_concolic/test/runtime_test",
+  "crates/symcts",
+  "crates/symcts_runtime",
   "utils/build_and_test_fuzzers",
   "utils/deexit",
   "utils/drcov_utils",
@@ -136,7 +138,7 @@ unicorn-engine = "2.0.1" # Used in libafl_unicorn
 uuid = { version = "1.10.0", features = ["serde", "v4"] }
 which = "8.0.0"
 windows = "0.59.0"
-z3 = "0.12.1"
+z3 = { path = "../z3.rs/z3" }
 fs2 = "0.4.3" # Used by OnDisk Corpus for file locking
 
 [workspace.lints.rust]

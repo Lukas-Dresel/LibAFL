@@ -12,7 +12,7 @@ use std::{
 
 use clap::Parser;
 use libafl::observers::concolic::{
-    serialization_format::{MessageFileReader, MessageFileWriter, DEFAULT_ENV_NAME},
+    serialization_format::{MessageFileReader, BinaryMessageWriter, DEFAULT_ENV_NAME},
     EXPRESSION_PRUNING, HITMAP_ENV_NAME, NO_FLOAT_ENV_NAME, SELECTIVE_SYMBOLICATION_ENV_NAME,
 };
 use libafl_bolts::{
@@ -138,7 +138,7 @@ fn main() {
             }
         } else {
             let mut writer =
-                MessageFileWriter::from_writer(output_file).expect("unable to create trace writer");
+                BinaryMessageWriter::from_writer(output_file).expect("unable to create trace writer");
             while let Some(message) = reader.next_message() {
                 if let Ok((_, message)) = message {
                     writer

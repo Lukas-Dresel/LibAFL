@@ -513,7 +513,6 @@ impl SchedulerTestcaseMetadata {
         self.cycle_and_time = cycle_and_time;
     }
 }
-
 libafl_bolts::impl_serdeany!(SchedulerTestcaseMetadata);
 
 #[cfg(feature = "std")]
