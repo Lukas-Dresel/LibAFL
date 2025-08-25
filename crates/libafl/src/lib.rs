@@ -1,3 +1,5 @@
+#![feature(process_setsid)]
+
 /*!
 Welcome to `LibAFL`
 */

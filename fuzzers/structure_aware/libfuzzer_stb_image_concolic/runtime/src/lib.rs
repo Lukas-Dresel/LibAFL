@@ -16,7 +16,7 @@ export_runtime!(
     NoFloat => NoFloat;
     CallStackCoverage::default() => CallStackCoverage; // QSym-style expression pruning
     tracing::TracingRuntime::new(
-        tracing::StdShMemMessageFileWriter::from_stdshmem_default_env()
+        tracing::StdShMemBinaryMessageWriter::from_stdshmem_default_env()
             .expect("unable to construct tracing runtime writer. (missing env?)"),
         false
     ) => tracing::TracingRuntime<StdShMem>

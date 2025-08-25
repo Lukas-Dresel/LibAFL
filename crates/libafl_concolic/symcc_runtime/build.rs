@@ -1,4 +1,4 @@
-use core::cell::RefCell;
+use core::{cell::RefCell, iter::Iterator, writeln};
 use std::{
     env,
     fs::File,
@@ -26,8 +26,8 @@ fn main() {
 
     write_rust_runtime_macro_file(&out_path, &symcc_src_path);
 
-    if env::var("TARGET").unwrap().contains("linux") {
-        let cpp_bindings = bindgen::Builder::default()
+    if true || env::var("TARGET").unwrap().contains("linux") {
+        let mut cpp_bindings = bindgen::Builder::default()
             .clang_arg(format!(
                 "-I{}",
                 symcc_src_path.join("runtime").to_str().unwrap()
@@ -40,7 +40,15 @@ fn main() {
                     .to_str()
                     .unwrap()
             ))
-            .clang_args(["-x", "c++", "-std=c++17"].iter())
+            .clang_args(["-x", "c++", "-std=c++17"].iter());
+
+        if true {
+            // we're in apple land
+            let apple_header = write_apple_symbol_header(&out_path);
+            cpp_bindings = cpp_bindings.header(apple_header.to_str().unwrap());
+        }
+
+        let cpp_bindings = cpp_bindings
             .header(
                 symcc_src_path
                     .join("runtime")
@@ -73,8 +81,27 @@ fn main() {
             write_symcc_rename_header(&rename_header_path, &cpp_bindings);
             build_and_link_symcc_runtime(&symcc_src_path, &rename_header_path);
         }
+        let bindings = bindgen::Builder::default()
+            // .clang_args(["-x", "c++", "-std=c++17"].iter())
+            .header(
+                symcc_src_path
+                .join("runtime")
+                .join("rust_backend")
+                .join("RustInterface.h")
+                .to_str().unwrap()
+            )
+            .generate()
+            // Unwrap the Result and panic on failure.
+            .expect("Unable to generate bindings");
+
+        // Write the bindings to the $OUT_DIR/bindings.rs file.
+        let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+        bindings
+            .write_to_file(out_path.join("interface.rs"))
+            .expect("Couldn't write bindings!");
     } else {
         println!("cargo:warning=Building SymCC is only supported on Linux");
+        panic!("Can not build symcc on this machine.")
     }
 }
 
@@ -114,14 +141,19 @@ fn checkout_symcc(out_path: &Path) -> PathBuf {
     } else {
         let repo_dir = out_path.join("libafl_symcc_src");
         if !repo_dir.exists() {
-            clone_symcc(&repo_dir);
+            if let Ok(repo) = std::env::var("SYMCC_DIR") {
+                // symlink the repo into the build dir
+                std::os::unix::fs::symlink(repo, &repo_dir).unwrap();
+            } else {
+                clone_symcc(&repo_dir);
+            }
         }
         repo_dir
     }
 }
 
 fn write_rust_runtime_macro_file(out_path: &Path, symcc_src_path: &Path) {
-    let rust_bindings = bindgen::Builder::default()
+    let mut rust_bindings = bindgen::Builder::default()
         .clang_arg(format!(
             "-I{}",
             symcc_src_path.join("runtime").to_str().unwrap()
@@ -134,7 +166,13 @@ fn write_rust_runtime_macro_file(out_path: &Path, symcc_src_path: &Path) {
                 .to_str()
                 .unwrap()
         ))
-        .clang_args(["-x", "c++", "-std=c++17"].iter())
+        .clang_args(["-x", "c++", "-std=c++17"].iter());
+    if true {
+        // we're in apple land
+        let apple_header = write_apple_symbol_header(&out_path);
+        rust_bindings = rust_bindings.header(apple_header.to_str().unwrap());
+    }
+    let rust_bindings = rust_bindings
         .header(
             symcc_src_path
                 .join("runtime")
@@ -196,6 +234,26 @@ fn write_symcc_runtime_bindings_file(out_path: &Path, cpp_bindings: &bindgen::Bi
     });
 }
 
+fn write_apple_symbol_header(out_path: &Path) -> PathBuf {
+    let x = "\n\
+#include <sys/types.h>
+#include <stdio.h>
+
+void* mmap64(...);\n
+size_t lseek64(...);\n\
+FILE* fopen64(...);\n\
+size_t ftello64(...);\n\
+size_t fseeko64(...);\n\
+int fileno(...);\n\
+";
+
+
+    let out = out_path.join("apple_renames.h");
+    let mut apple_symbol_header_file = File::create(&out).unwrap();
+    writeln!(apple_symbol_header_file, "{}", x).expect("Could not write apple header?");
+    out
+}
+
 fn write_symcc_rename_header(rename_header_path: &Path, cpp_bindings: &bindgen::Bindings) {
     let mut rename_header_file = File::create(rename_header_path).unwrap();
     writeln!(
@@ -236,8 +294,11 @@ fn build_and_link_symcc_runtime(symcc_src_path: &Path, rename_header_path: &Path
         .build()
         .join("lib");
     link_with_cpp_stdlib();
+    if !cpp_lib.join("libSymRuntimeStatic.a").exists() {
+        panic!("SymCC runtime build failed: {}", cpp_lib.display());
+    }
     println!("cargo:rustc-link-search=native={}", cpp_lib.display());
-    println!("cargo:rustc-link-lib=static=SymRuntime");
+    println!("cargo:rustc-link-lib=static=SymRuntimeStatic");
 }
 
 fn link_with_cpp_stdlib() {

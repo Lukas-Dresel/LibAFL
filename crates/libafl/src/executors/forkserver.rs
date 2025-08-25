@@ -145,7 +145,7 @@ fn report_error_and_exit(status: i32) -> Result<(), Error> {
 /// The length of header bytes which tells shmem size
 pub const SHMEM_FUZZ_HDR_SIZE: usize = 4;
 /// Maximum default length for input
-pub const MAX_INPUT_SIZE_DEFAULT: usize = 1024 * 1024;
+pub const MAX_INPUT_SIZE_DEFAULT: usize = 1024 * 1024 * 1024; // 1 GiB
 /// Minimum default length for input
 pub const MIN_INPUT_SIZE_DEFAULT: usize = 1;
 /// Environment variable key for shared memory id for input and its len
@@ -513,12 +513,12 @@ impl Forkserver {
         // # Saftey
         // The pipe file descriptors used for `setpipe` are valid at this point.
         let fsrv_handle = unsafe {
-            match command
+            match ConfigTarget::setsid(command
                 .env("LD_BIND_NOW", "1")
                 .envs(envs)
                 .setlimit(memlimit)
                 .set_coredump(afl_debug)
-                .setsid()
+                )
                 .setpipe(
                     st_pipe.read_end().unwrap(),
                     st_pipe.write_end().unwrap(),
@@ -732,7 +732,7 @@ where
     }
 }
 
-impl ForkserverExecutor<(), (), UnixShMem, ()> {
+impl ForkserverExecutor<(), (), (), UnixShMem> {
     /// Builder for `ForkserverExecutor`
     #[must_use]
     pub fn builder() -> ForkserverExecutorBuilder<'static, UnixShMemProvider> {
@@ -809,7 +809,7 @@ where
 
     /// Execute input, but side-step the execution counter.
     #[inline]
-    fn execute_input_uncounted(&mut self, input: &[u8]) -> Result<ExitKind, Error> {
+    pub fn execute_input_uncounted(&mut self, input: &[u8]) -> Result<ExitKind, Error> {
         let mut exit_kind = ExitKind::Ok;
 
         let last_run_timed_out = self.forkserver.last_run_timed_out_raw();
@@ -1329,6 +1329,33 @@ where
             }
         } else {
             log::warn!("Forkserver Options are not available.");
+        }
+
+        match forkserver.read_st()
+        {
+            Err(e) => {
+                // use nonblocking waitpid to check if the forkserver is still alive
+                let status_maybe = waitpid(forkserver.child_pid(), Some(nix::sys::wait::WaitPidFlag::WNOHANG)).expect("nonblocking waitpid failed when trying to get an error code for the forkserver??");
+
+                let msg = format!(
+                    "Failed to start the forkserver, could not read start constant: from {:?}, status: {:?}, error: {:?}",
+                    forkserver, status_maybe, e
+                );
+                return Err(Error::unknown(msg));
+            }
+            Ok(start_constant) => {
+                // We expect the start constant to be 0x4269dead
+                if (start_constant as u32) != 0x4269dead {
+                    return Err(Error::unknown(format!(
+                        "Forkserver desync: Start constant does not match?? Got {:#x}, expected {:#?}",
+                        start_constant, 0x4269dead
+                    )));
+                }
+            }
+        }
+        
+        if let Err(e) = forkserver.write_ctl(0x4269dead) {
+            return Err(Error::unknown(format!("Writing to forkserver failed: {e:?}")));
         }
 
         Ok(())
