@@ -13,6 +13,7 @@ members = [
   "utils/deexit",
   "utils/libafl_benches",
   "utils/gramatron/construct_automata",
+  "symcts_fuzz",
 ]
 default-members = [
   "libafl",
