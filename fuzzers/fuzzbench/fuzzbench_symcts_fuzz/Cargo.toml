@@ -43,7 +43,7 @@ mimalloc = { version = "0.1.43", default-features = false }
 
 symcts_fuzz = { path = "../../../symcts_fuzz", features= [] }
 
-nix = { version = "*", features = ["fs"] }
+nix = { version = "0.29", features = ["fs"] }
 
 [lib]
 name = "fuzzbench"
