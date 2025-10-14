@@ -91,7 +91,7 @@ debug = true
 [dependencies]
 ahash = "*"
 tempfile = "*"
-wide = "*"
+wide = {version = "0.7.33"}
 regex = "*"
 glob = "*"
 bitvec = {version="*", features = ["serde"]}
