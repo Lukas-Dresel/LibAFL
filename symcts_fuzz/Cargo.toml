@@ -106,7 +106,7 @@ libafl_targets = { path = "../libafl_targets/", features = ["sancov_pcguard_hitc
 libafl_bolts = { path = "../libafl_bolts/", features = ["std"] }
 clap = { version = "3.1.18", features = ["derive"] }
 mimalloc = { version = "*", default-features = false }
-sorted-vec = "*"
+# sorted-vec = { version}
 num-bigint = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = { version = "*" }

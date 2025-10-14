@@ -1,3 +1,4 @@
 libpng-*
 fuzzer
 fuzzbench
+fuzzer_out.txt

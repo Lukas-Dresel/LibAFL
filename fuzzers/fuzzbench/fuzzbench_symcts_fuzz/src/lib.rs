@@ -1,3 +1,5 @@
+#![feature(unsafe_attributes)]
+
 //! A singlethreaded libfuzzer-like fuzzer that can auto-restart.
 use mimalloc::MiMalloc;
 #[global_allocator]
