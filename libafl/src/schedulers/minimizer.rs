@@ -275,8 +275,9 @@ where
             let mut entry = state.corpus().get(id)?.borrow_mut();
             let factor = F::compute(state, &mut *entry)?;
             let meta = entry.metadata_map_mut().get_mut::<M>().ok_or_else(|| {
+                let type_string = type_name::<M>();
                 Error::key_not_found(format!(
-                    "Metadata needed for MinimizerScheduler not found in testcase #{id}"
+                    "Metadata needed for MinimizerScheduler not found in testcase #{id}: looking for {type_string}"
                 ))
             })?;
             let top_rateds = state.metadata_map().get::<TopRatedsMetadata>().unwrap();

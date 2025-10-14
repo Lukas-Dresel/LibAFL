@@ -280,6 +280,26 @@ pub struct StdState<I, C, R, SC> {
     phantom: PhantomData<I>,
 }
 
+/// A trait that allows you to easily pull out the most commonly used together fields from a state.
+pub trait BetterStateTrait<I>: HasCorpus<Input=I> + HasRand + State
+{
+    /// Get mutable references to all important state components simultaneously
+    fn get_state_components_rand_corpus_metadata(&mut self) -> (&mut Self::Rand, &mut Self::Corpus, &mut SerdeAnyMap);
+}
+
+impl<C, I, R, SC> BetterStateTrait<I> for StdState<I, C, R, SC>
+where
+    C: Corpus<Input=I>,
+    I: Input,
+    R: Rand,
+    SC: Corpus<Input=I>,
+    StdState<I, C, R, SC>: HasCorpus<Input=I, Corpus=C>,
+{
+    fn get_state_components_rand_corpus_metadata(&mut self) -> (&mut Self::Rand, &mut Self::Corpus, &mut SerdeAnyMap) {
+        (&mut self.rand, &mut self.corpus, &mut self.metadata)
+    }
+}
+
 impl<I, C, R, SC> UsesInput for StdState<I, C, R, SC>
 where
     I: Input,

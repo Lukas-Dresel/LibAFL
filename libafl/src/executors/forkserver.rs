@@ -114,7 +114,7 @@ fn report_error_and_exit(status: i32) -> Result<(), Error> {
 
 /// The length of header bytes which tells shmem size
 const SHMEM_FUZZ_HDR_SIZE: usize = 4;
-const MAX_INPUT_SIZE_DEFAULT: usize = 1024 * 1024;
+const MAX_INPUT_SIZE_DEFAULT: usize = 1024 * 1024 * 1024;
 const MIN_INPUT_SIZE_DEFAULT: usize = 1;
 
 /// The default signal to use to kill child processes
@@ -378,11 +378,11 @@ impl Forkserver {
         #[cfg(feature = "regex")]
         command.env("ASAN_OPTIONS", get_asan_runtime_flags_with_log_path());
 
-        let fsrv_handle = match command
+        let fsrv_handle = match ConfigTarget::setsid(command
             .env("LD_BIND_NOW", "1")
             .envs(envs)
             .setlimit(memlimit)
-            .setsid()
+        )
             .setstdin(input_filefd, use_stdin)
             .setpipe(
                 st_pipe.read_end().unwrap(),
@@ -614,6 +614,106 @@ where
     /// The coverage map size if specified by the target
     pub fn coverage_map_size(&self) -> Option<usize> {
         self.map_size
+    }
+
+    #[inline]
+    pub fn execute_input_uncounted(
+        &mut self,
+        input: &[u8],
+    ) -> Result<ExitKind, Error> {
+        let mut exit_kind = ExitKind::Ok;
+
+        let last_run_timed_out = self.forkserver.last_run_timed_out_raw();
+
+        let mut input_bytes: OwnedSlice<'_, u8> = input.to_owned().into();
+        let mut input_size = input_bytes.as_slice().len();
+        if input_size > self.max_input_size {
+            // Truncate like AFL++ does
+            input_size = self.max_input_size;
+        } else if input_size < self.min_input_size {
+            // Extend like AFL++ does
+            input_size = self.min_input_size;
+            let mut input_bytes_copy = Vec::with_capacity(input_size);
+            input_bytes_copy
+                .as_slice_mut()
+                .copy_from_slice(input_bytes.as_slice());
+            input_bytes = OwnedSlice::from(input_bytes_copy);
+        }
+        let input_size_in_bytes = input_size.to_ne_bytes();
+        if self.uses_shmem_testcase {
+            debug_assert!(
+                self.map.is_some(),
+                "The uses_shmem_testcase() bool can only exist when a map is set"
+            );
+            // # Safety
+            // Struct can never be created when uses_shmem_testcase is true and map is none.
+            let map = unsafe { self.map.as_mut().unwrap_unchecked() };
+            // The first four bytes declares the size of the shmem.
+            map.as_slice_mut()[..SHMEM_FUZZ_HDR_SIZE]
+                .copy_from_slice(&input_size_in_bytes[..SHMEM_FUZZ_HDR_SIZE]);
+            map.as_slice_mut()[SHMEM_FUZZ_HDR_SIZE..(SHMEM_FUZZ_HDR_SIZE + input_size)]
+                .copy_from_slice(&input_bytes.as_slice()[..input_size]);
+        } else {
+            self.input_file
+                .write_buf(&input_bytes.as_slice()[..input_size])?;
+        }
+
+        let send_len = self.forkserver.write_ctl(last_run_timed_out)?;
+
+        self.forkserver.set_last_run_timed_out(false);
+
+        if send_len != 4 {
+            return Err(Error::unknown(
+                "Unable to request new process from fork server (OOM?)".to_string(),
+            ));
+        }
+
+        let (recv_pid_len, pid) = self.forkserver.read_st()?;
+        if recv_pid_len != 4 {
+            return Err(Error::unknown(
+                "Unable to request new process from fork server (OOM?)".to_string(),
+            ));
+        }
+
+        if pid <= 0 {
+            return Err(Error::unknown(
+                "Fork server is misbehaving (OOM?)".to_string(),
+            ));
+        }
+
+        self.forkserver.set_child_pid(Pid::from_raw(pid));
+
+        if let Some(status) = self.forkserver.read_st_timed(&self.timeout)? {
+            self.forkserver.set_status(status);
+            let exitcode_is_crash = if let Some(crash_exitcode) = self.crash_exitcode {
+                (libc::WEXITSTATUS(self.forkserver().status()) as i8) == crash_exitcode
+            } else {
+                false
+            };
+            if libc::WIFSIGNALED(self.forkserver().status()) || exitcode_is_crash {
+                exit_kind = ExitKind::Crash;
+                #[cfg(feature = "regex")]
+                if let Some(asan_observer) = self.observers.get_mut(&self.asan_obs) {
+                    asan_observer.parse_asan_output_from_asan_log_file(pid)?;
+                }
+            }
+        } else {
+            self.forkserver.set_last_run_timed_out(true);
+
+            // We need to kill the child in case he has timed out, or we can't get the correct pid in the next call to self.executor.forkserver_mut().read_st()?
+            let _ = kill(self.forkserver().child_pid(), self.forkserver.kill_signal);
+            let (recv_status_len, _) = self.forkserver.read_st()?;
+            if recv_status_len != 4 {
+                return Err(Error::unknown("Could not kill timed-out child".to_string()));
+            }
+            exit_kind = ExitKind::Timeout;
+        }
+
+        if !libc::WIFSTOPPED(self.forkserver().status()) {
+            self.forkserver.reset_child_pid();
+        }
+
+        Ok(exit_kind)
     }
 }
 
@@ -1026,6 +1126,35 @@ where
             log::warn!("Forkserver Options are not available.");
         }
 
+
+        match forkserver.read_st()
+        {
+            Err(e) => {
+                // use nonblocking waitpid to check if the forkserver is still alive
+                let status_maybe = waitpid(forkserver.child_pid(), Some(nix::sys::wait::WaitPidFlag::WNOHANG)).expect("nonblocking waitpid failed when trying to get an error code for the forkserver??");
+
+                let msg = format!(
+                    "Failed to start the forkserver, could not read start constant: from {:?}, status: {:?}, error: {:?}",
+                    forkserver, status_maybe, e
+                );
+                return Err(Error::unknown(msg));
+            }
+            Ok((_rlen, start_constant)) => {
+                // We expect the start constant to be 0x4269dead
+                if (start_constant as u32) != 0x4269dead {
+                    return Err(Error::unknown(format!(
+                        "Forkserver desync: Start constant does not match?? Got {:#x}, expected {:#?}",
+                        start_constant, 0x4269dead
+                    )));
+                }
+            }
+        }
+        
+        if let Err(e) = forkserver.write_ctl(0x4269dead) {
+            return Err(Error::unknown(format!("Writing to forkserver failed: {e:?}")));
+        }
+
+
         Ok(())
     }
 
@@ -1344,100 +1473,7 @@ where
         input: &Self::Input,
     ) -> Result<ExitKind, Error> {
         *state.executions_mut() += 1;
-
-        let mut exit_kind = ExitKind::Ok;
-
-        let last_run_timed_out = self.forkserver.last_run_timed_out_raw();
-
-        let mut input_bytes = input.target_bytes();
-        let mut input_size = input_bytes.as_slice().len();
-        if input_size > self.max_input_size {
-            // Truncate like AFL++ does
-            input_size = self.max_input_size;
-        } else if input_size < self.min_input_size {
-            // Extend like AFL++ does
-            input_size = self.min_input_size;
-            let mut input_bytes_copy = Vec::with_capacity(input_size);
-            input_bytes_copy
-                .as_slice_mut()
-                .copy_from_slice(input_bytes.as_slice());
-            input_bytes = OwnedSlice::from(input_bytes_copy);
-        }
-        let input_size_in_bytes = input_size.to_ne_bytes();
-        if self.uses_shmem_testcase {
-            debug_assert!(
-                self.map.is_some(),
-                "The uses_shmem_testcase() bool can only exist when a map is set"
-            );
-            // # Safety
-            // Struct can never be created when uses_shmem_testcase is true and map is none.
-            let map = unsafe { self.map.as_mut().unwrap_unchecked() };
-            // The first four bytes declares the size of the shmem.
-            map.as_slice_mut()[..SHMEM_FUZZ_HDR_SIZE]
-                .copy_from_slice(&input_size_in_bytes[..SHMEM_FUZZ_HDR_SIZE]);
-            map.as_slice_mut()[SHMEM_FUZZ_HDR_SIZE..(SHMEM_FUZZ_HDR_SIZE + input_size)]
-                .copy_from_slice(&input_bytes.as_slice()[..input_size]);
-        } else {
-            self.input_file
-                .write_buf(&input_bytes.as_slice()[..input_size])?;
-        }
-
-        let send_len = self.forkserver.write_ctl(last_run_timed_out)?;
-
-        self.forkserver.set_last_run_timed_out(false);
-
-        if send_len != 4 {
-            return Err(Error::unknown(
-                "Unable to request new process from fork server (OOM?)".to_string(),
-            ));
-        }
-
-        let (recv_pid_len, pid) = self.forkserver.read_st()?;
-        if recv_pid_len != 4 {
-            return Err(Error::unknown(
-                "Unable to request new process from fork server (OOM?)".to_string(),
-            ));
-        }
-
-        if pid <= 0 {
-            return Err(Error::unknown(
-                "Fork server is misbehaving (OOM?)".to_string(),
-            ));
-        }
-
-        self.forkserver.set_child_pid(Pid::from_raw(pid));
-
-        if let Some(status) = self.forkserver.read_st_timed(&self.timeout)? {
-            self.forkserver.set_status(status);
-            let exitcode_is_crash = if let Some(crash_exitcode) = self.crash_exitcode {
-                (libc::WEXITSTATUS(self.forkserver().status()) as i8) == crash_exitcode
-            } else {
-                false
-            };
-            if libc::WIFSIGNALED(self.forkserver().status()) || exitcode_is_crash {
-                exit_kind = ExitKind::Crash;
-                #[cfg(feature = "regex")]
-                if let Some(asan_observer) = self.observers.get_mut(&self.asan_obs) {
-                    asan_observer.parse_asan_output_from_asan_log_file(pid)?;
-                }
-            }
-        } else {
-            self.forkserver.set_last_run_timed_out(true);
-
-            // We need to kill the child in case he has timed out, or we can't get the correct pid in the next call to self.executor.forkserver_mut().read_st()?
-            let _ = kill(self.forkserver().child_pid(), self.forkserver.kill_signal);
-            let (recv_status_len, _) = self.forkserver.read_st()?;
-            if recv_status_len != 4 {
-                return Err(Error::unknown("Could not kill timed-out child".to_string()));
-            }
-            exit_kind = ExitKind::Timeout;
-        }
-
-        if !libc::WIFSTOPPED(self.forkserver().status()) {
-            self.forkserver.reset_child_pid();
-        }
-
-        Ok(exit_kind)
+        self.execute_input_uncounted(input.target_bytes().as_ref())
     }
 }
 
