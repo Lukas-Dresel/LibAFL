@@ -11,6 +11,7 @@ edition = "2021"
 default = ["std"]
 std = []
 no_link_main = ["libafl_targets/libfuzzer_no_link_main"]
+introspection = ["libafl/introspection"]
 
 [profile.release]
 lto = true
