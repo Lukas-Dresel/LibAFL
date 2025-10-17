@@ -195,13 +195,13 @@ where
         exit_kind: &libafl::executors::ExitKind,
     ) -> Result<bool, libafl::Error>
     {
+        let tr_full = TimeRecorder::new("symcts_feedback_is_interesting_total");
         log::debug!(target: "symcts_feedback", "Target reported exit kind of {:?}", exit_kind);
         let branches_before = { state.metadata::<SyMCTSGlobalMetadata>().unwrap().coverage_point_info.len() };
 
-        let tr = TimeRecorder::new("symcts_feedback_is_interesting");
-        let tr: TimeRecorder = TimeRecorder::new("symcts_feedback_is_interesting--get_coverage_points");
+        let tr_is_interesting_get_coverage_points: TimeRecorder = TimeRecorder::new("symcts_feedback_is_interesting--get_coverage_points");
         let (cov_summary, single_cov) = self.get_coverage_points(input, observers)?;
-        drop(tr); // log time
+        drop(tr_is_interesting_get_coverage_points); // log time
         
         let time_observer = observers
             .match_name::<libafl::observers::TimeObserver>(&self.time_observer_name)
@@ -209,12 +209,14 @@ where
         let exec_time_millis = time_observer.last_runtime().unwrap().as_millis() as usize;
         add_time_for_slot("target_execution", Duration::from_millis(exec_time_millis as u64));
 
+        let tr_symcts_afl_feedback_record_metadata = TimeRecorder::new("symcts_feedback_is_interesting--record_metadata");
         let (modified_global, _testcase_len) = self.record_metadata(
             state, input, observers,
             &cov_summary, &single_cov,
             exec_time_millis,
             exit_kind
         )?;
+        drop(tr_symcts_afl_feedback_record_metadata); // log time
 
         let branches_after = { state.metadata::<SyMCTSGlobalMetadata>().unwrap().coverage_point_info.len() };
         assert!(branches_after >= branches_before);
@@ -236,6 +238,7 @@ where
             )?;
         }
 
+        let tr_postprocessing = TimeRecorder::new("symcts_feedback_is_interesting--postprocessing");
         let global_meta = state.metadata_mut::<SyMCTSGlobalMetadata>().unwrap();
 
         global_meta.total_num_times_traced += 1;
