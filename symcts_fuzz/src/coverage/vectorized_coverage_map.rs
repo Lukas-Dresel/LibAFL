@@ -212,21 +212,37 @@ impl VectorizedCoverage {
         let mut map = Vec::with_capacity(slice.len()/LANES+1);
         for i in 0..(slice.len() + LANES - 1) / LANES {
             let start = i * LANES;
-            let mut val = [MIN_SINGLE_COUNT; LANES];
-            for j in 0..LANES {
-                let x = *slice.get(start + j).unwrap_or(&0);
-                val[j] = if x == 0 {
-                    INSTRUMENTATION_COUNTER_ZERO
-                } else {
-                    #[cfg(feature = "symcts_32bit_counters")]
-                    let hit_count = x & !(3 << 30);
-                    #[cfg(not(feature = "symcts_32bit_counters"))]
-                    let hit_count = x;
+            #[cfg(not(feature = "symcts_32bit_counters"))]
+            let mut val = {
+                // optimized case: 8-bit counters, no adjacent/function bits
+                // produce the slice directly
+                let slice = &slice[start..std::cmp::min(start + LANES, slice.len())];
+                let mut array = [MIN_SINGLE_COUNT; LANES];
+                for (j, &x) in slice.iter().enumerate() {
+                    array[j] = if x == 0 {
+                        INSTRUMENTATION_COUNTER_ZERO
+                    } else {
+                        let bucketed_count = get_bucketed_hitcount_inner(x as usize) as InstrumentationCounterType;
+                        bucketed_count.try_into().expect("should be able to convert to CounterType")
+                    };
+                }
+                array
+            };
+            #[cfg(feature = "symcts_32bit_counters")]
+            let mut val = {
+                let slice = [MIN_SINGLE_COUNT; LANES];
+                for j in 0..LANES {
+                    let x = *slice.get(start + j).unwrap_or(&0);
+                    slice[j] = if x == 0 {
+                        INSTRUMENTATION_COUNTER_ZERO
+                    } else {
+                        #[cfg(feature = "symcts_32bit_counters")]
+                        let hit_count = x & !(3 << 30);
+                        #[cfg(not(feature = "symcts_32bit_counters"))]
+                        let hit_count = x;
 
-                    let bucketed_count = get_bucketed_hitcount_inner(hit_count as usize) as InstrumentationCounterType;
+                        let bucketed_count = get_bucketed_hitcount_inner(hit_count as usize) as InstrumentationCounterType;
 
-                    #[cfg(feature = "symcts_32bit_counters")]
-                    {
                         let adjacent = (x & (2 << 30)) != 0;
                         let func_adjacent = (x & (1 << 30)) != 0;
                         match (bucketed_count, adjacent, func_adjacent) {
@@ -235,13 +251,9 @@ impl VectorizedCoverage {
                             (x, _, _) => 2 + x,
                         }
                     }
-                    #[cfg(not(feature = "symcts_32bit_counters"))]
-                    {
-                        bucketed_count
-                    }
+                    .try_into().expect("should be able to convert to CounterType");
                 }
-                .try_into().expect("should be able to convert to CounterType");
-            }
+            };
             let counter = VectorizedCounter::from_array(val);
             non_zero_bitmap.set(i, counter.simd_ne(MIN_COUNT).any());
             map.push(counter);
