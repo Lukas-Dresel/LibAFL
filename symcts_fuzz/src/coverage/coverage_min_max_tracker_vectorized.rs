@@ -7,6 +7,7 @@ use core::panic;
 use std::{fmt::Debug, ops::{BitOrAssign, BitOr}};
 
 use crate::coverage::vectorized_coverage_map::CounterCondMask;
+use crate::util::TimeRecorder;
 
 use super::vectorized_coverage_map::{LANES, MinimizingVectorizedCounter, MaximizingVectorizedCounter, VectorizedCoverage, MIN_COUNT};
 use super::InterestReason;
@@ -78,9 +79,11 @@ impl CoverageMinMaxTracker {
         // if coverage.input_length_exponent > self.longest_input_length_exponent_seen {
         //     return Some(InterestReason::Longest { old: self.longest_input_length_exponent_seen, new: coverage.input_length_exponent });
         // }
+        let tr_full = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for");
         assert!(coverage.num_vectored_entries() == self.map.len() || self.map.len() == 0);
         if self.map.len() == 0 {
             // here we only have to iterate over the non-zeros in the input, we know for sure they are interesting
+            let tr_fastpath_empty_map = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--fastpath_empty_map");
             return coverage
                 .non_zero_bitmap
                 .iter_ones()
@@ -100,9 +103,9 @@ impl CoverageMinMaxTracker {
 
         let positions_to_consider = &coverage.non_zero_bitmap.clone().bitor(&self.present_bitmap);
 
-
         #[cfg(feature="coverage_fastpath_no_change_case")]
         {
+            let tr_fastpath_no_change_case = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--fastpath_no_change_case");
             let mut is_interesting = CounterCondMask::splat(false);
             for pos in positions_to_consider.iter_ones() {
                 let (min_ent, max_ent) = &self.map[pos];
@@ -116,11 +119,12 @@ impl CoverageMinMaxTracker {
 
         // then, in the rare case that we do see an improvement, we have to do it again, to find where the improvement
         // happened
-
+        let tr_detailed_check = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check");
         for pos in positions_to_consider.iter_ones() {
             let (min_ent, max_ent) = &self.map[pos];
             let cur_ent = coverage.map[pos];
 
+            let tr_detailed_check_minimizes = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check--minimizes");
             let minimizes = min_ent.is_better(cur_ent);
 
             // fast path out ASAP if at all possible
@@ -132,7 +136,9 @@ impl CoverageMinMaxTracker {
                     new: cur_ent.to_array()[index_min].into(),
                 });
             }
+            drop(tr_detailed_check_minimizes); // log time
 
+            let tr_detailed_check_maximizes = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check--maximizes");
             let maximizes = max_ent.is_better(cur_ent);
             if maximizes.any() {
                 let index_max = maximizes.to_array().iter().position(|&x| x).unwrap();
@@ -142,6 +148,7 @@ impl CoverageMinMaxTracker {
                     new: cur_ent.to_array()[index_max].into(),
                 });
             }
+            drop(tr_detailed_check_maximizes); // log time
         }
         return None;
     }
