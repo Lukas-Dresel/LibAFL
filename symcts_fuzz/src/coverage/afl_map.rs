@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, collections::HashSet};
+use std::{collections::HashSet, marker::PhantomData, time::Duration};
 
 use libafl_bolts::{impl_serdeany, prelude::Rand, tuples::MatchName, AsIter, AsSlice, HasLen, Named};
 use libafl::{
@@ -21,7 +21,7 @@ use libafl::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{coverage::vectorized_coverage_map::CounterType, metadata::global::SyMCTSGlobalMetadata};
+use crate::{coverage::vectorized_coverage_map::CounterType, metadata::global::SyMCTSGlobalMetadata, util::{add_time_for_slot, TimeRecorder}};
 
 use super::{SyMCTSTestCaseAnnotationFeedback, CoverageSummary, loop_bucketing::get_bucketed_hitcount_outer, SingleCoverage};
 
@@ -137,6 +137,7 @@ impl<I> SyMCTSTestCaseAnnotationFeedback for SyMCTSAFLBitmapCoverageFeedback<I> 
     where
         I2: HasLen
     {
+        let tr_full = TimeRecorder::new("get_coverage_points");
         let map_metadata = observers
             .match_name::<StdMapObserver<CounterType, false>>(&self.map_observer_name)
             .ok_or_else( || libafl::Error::illegal_state(format!("Must have hitcounts map observer! Expected to find {} of type {}, got {}",
@@ -145,21 +146,27 @@ impl<I> SyMCTSTestCaseAnnotationFeedback for SyMCTSAFLBitmapCoverageFeedback<I> 
                 std::any::type_name::<OT>(),
             )))?;
 
+        let tr_get_points_iter = TimeRecorder::new("get_coverage_points--getting_map_iter");
         let coverage_points = map_metadata
             .as_iter()
             .enumerate()
             .filter_map(|(byte_idx, count)| AFLBitmapCoveragePoint::new(byte_idx, *count))
             .collect::<HashSet<AFLBitmapCoveragePoint>>();
+        drop(tr_get_points_iter); // log time
 
         // log::debug!(target: "symcts_feedback", "Coverage points: {:?}", coverage_points.iter().sorted().collect::<Vec<_>>());
 
+        let tr_from_shm_slice = TimeRecorder::new("get_coverage_points--from_shm_slice");
         let single_cov_map = SingleCoverage::from_shm_slice(input.len(), map_metadata.as_slice());
+        drop(tr_from_shm_slice); // log time
+
         Ok((CoverageSummary {
             points: coverage_points,
             trace_length: single_cov_map.non_zero_bitmap.count_ones(), // approximate trace length: the number of branches hit
             input_length: map_metadata.as_slice().len(),
         }, single_cov_map))
     }
+    
 }
 
 // impl<S> StateInitializer<S> for SyMCTSAFLBitmapCoverageFeedback
@@ -191,12 +198,16 @@ where
         log::debug!(target: "symcts_feedback", "Target reported exit kind of {:?}", exit_kind);
         let branches_before = { state.metadata::<SyMCTSGlobalMetadata>().unwrap().coverage_point_info.len() };
 
+        let tr = TimeRecorder::new("symcts_feedback_is_interesting");
+        let tr: TimeRecorder = TimeRecorder::new("symcts_feedback_is_interesting--get_coverage_points");
         let (cov_summary, single_cov) = self.get_coverage_points(input, observers)?;
+        drop(tr); // log time
+        
         let time_observer = observers
             .match_name::<libafl::observers::TimeObserver>(&self.time_observer_name)
             .expect("Failed to get TimeObserver by name");
         let exec_time_millis = time_observer.last_runtime().unwrap().as_millis() as usize;
-        log::info!(target: "symcts_feedback", "Execution time: {} ms {:?}", exec_time_millis, time_observer.last_runtime());
+        add_time_for_slot("target_execution", Duration::from_millis(exec_time_millis as u64));
 
         let (modified_global, _testcase_len) = self.record_metadata(
             state, input, observers,
@@ -204,6 +215,7 @@ where
             exec_time_millis,
             exit_kind
         )?;
+
         let branches_after = { state.metadata::<SyMCTSGlobalMetadata>().unwrap().coverage_point_info.len() };
         assert!(branches_after >= branches_before);
 

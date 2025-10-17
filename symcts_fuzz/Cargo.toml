@@ -89,6 +89,7 @@ opt-level = 3
 debug = true
 
 [dependencies]
+once_cell = "*"
 ahash = "*"
 tempfile = "*"
 wide = {version = "0.7.33"}

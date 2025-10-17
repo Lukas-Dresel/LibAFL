@@ -31,6 +31,7 @@ use serde::Serialize;
 
 use crate::metadata::global::CoverageLocationInfo;
 use crate::metadata::global::SyMCTSGlobalMetadata;
+use crate::util::TimeRecorder;
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub enum InterestReason {
@@ -71,6 +72,7 @@ impl std::fmt::Debug for CoverageSummary {
         write!(f, "CoverageSummary {{ points: {:?}, trace_length: {}, input_length: {} }}", sorted_cov_points, self.trace_length, self.input_length)
     }
 }
+
 pub trait SyMCTSTestCaseAnnotationFeedback
 {
     fn get_coverage_points<I, S, OT>(
@@ -99,6 +101,7 @@ pub trait SyMCTSTestCaseAnnotationFeedback
         OT: ObserversTuple<S>,
         S: MaybeHasClientPerfMonitor + HasMetadata + HasRand + BetterStateTrait<I>,
     {
+        let tr_full = TimeRecorder::new("symcts_feedback_record_metadata");
         let mut modified = false;
 
         match exit_kind {
@@ -124,6 +127,8 @@ pub trait SyMCTSTestCaseAnnotationFeedback
         let global_state = metadata.get_mut::<SyMCTSGlobalMetadata>().unwrap();
 
         let mut found = None;
+        let time_before_interestingness_check = std::time::Instant::now();
+        let tr_interesting = TimeRecorder::new("symcts_feedback_record_metadata--check_interestingness");
         for cov_point in &coverage_summary.points {
             let cov_info = global_state.coverage_point_info.entry(cov_point.clone()).or_insert_with(|| {
                 let cov_info = CoverageLocationInfo {
@@ -142,6 +147,9 @@ pub trait SyMCTSTestCaseAnnotationFeedback
 
             #[cfg(not(feature = "coverage_single_level"))]
             let reason = if let Some(tracker) = &cov_info.coverage_min_max_tracker {
+                use crate::util::TimeRecorder;
+
+                let tr_is_interesting_internal = TimeRecorder::new("symcts_feedback_record_metadata--is_interesting_internal");
                 tracker.is_interesting_for(&cur_cov)
             } else {
                 Some(InterestReason::Novel)
@@ -149,6 +157,7 @@ pub trait SyMCTSTestCaseAnnotationFeedback
 
             #[cfg(feature = "coverage_single_level")]
             let reason = if let Some(tracker) = &cov_info.coverage_min_max_tracker {
+                let tr_is_interesting_internal = TimeRecorder::new("symcts_feedback_record_metadata--is_interesting_internal");
                 let tmp_cov = SingleCoverage::from_element(
                     cur_cov.input_length_exponent,
                     cur_cov.count_for_branch(cov_point.branch_index)
@@ -162,6 +171,8 @@ pub trait SyMCTSTestCaseAnnotationFeedback
                 break;
             }
         }
+        drop(tr_interesting);
+        
         if let Some((cov_point, reason)) = found {
             let feedback_log_path = global_state.sync_dir.join(".feedback.log");
             let mut feedback_log = std::fs::OpenOptions::new()
