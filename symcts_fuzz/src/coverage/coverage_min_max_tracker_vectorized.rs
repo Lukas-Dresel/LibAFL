@@ -101,17 +101,41 @@ impl CoverageMinMaxTracker {
         // so let's do that now, doing a quick bitwise or on the map only to detect if any improvements were made
         // if not, this is the fastest possible way out
 
-        let positions_to_consider = &coverage.non_zero_bitmap.clone().bitor(&self.present_bitmap);
-
         #[cfg(feature="coverage_fastpath_no_change_case")]
         {
             let tr_fastpath_no_change_case = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--fastpath_no_change_case");
             let mut is_interesting = CounterCondMask::splat(false);
-            for pos in positions_to_consider.iter_ones() {
-                let (min_ent, max_ent) = &self.map[pos];
-                let cur_ent = coverage.map[pos];
-                is_interesting |= min_ent.is_better(cur_ent) | max_ent.is_better(cur_ent);
+
+            // Iterate through bitmap chunks and OR them on-the-fly to avoid allocation
+            let self_storage = self.present_bitmap.as_raw_slice();
+            let coverage_storage = coverage.non_zero_bitmap.as_raw_slice();
+            let max_chunks = self_storage.len().max(coverage_storage.len());
+
+            for chunk_idx in 0..max_chunks {
+                let self_chunk = self_storage.get(chunk_idx).copied().unwrap_or(0);
+                let cov_chunk = coverage_storage.get(chunk_idx).copied().unwrap_or(0);
+                let union_chunk = self_chunk | cov_chunk;
+
+                if union_chunk == 0 {
+                    continue; // Skip empty chunks
+                }
+
+                // Iterate over set bits in this chunk
+                let mut remaining = union_chunk;
+                while remaining != 0 {
+                    let bit_offset = remaining.trailing_zeros() as usize;
+                    let pos = chunk_idx * (usize::BITS as usize) + bit_offset;
+
+                    if pos < self.map.len() {
+                        let (min_ent, max_ent) = &self.map[pos];
+                        let cur_ent = coverage.map[pos];
+                        is_interesting |= MinimizingVectorizedCounter::is_better_combined(min_ent, max_ent, cur_ent);
+                    }
+
+                    remaining &= remaining - 1; // Clear lowest set bit
+                }
             }
+
             if !is_interesting.any() {
                 return None; // the most common case, no improvements anywhere, just exit out
             }
@@ -120,35 +144,59 @@ impl CoverageMinMaxTracker {
         // then, in the rare case that we do see an improvement, we have to do it again, to find where the improvement
         // happened
         let tr_detailed_check = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check");
-        for pos in positions_to_consider.iter_ones() {
-            let (min_ent, max_ent) = &self.map[pos];
-            let cur_ent = coverage.map[pos];
 
-            let tr_detailed_check_minimizes = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check--minimizes");
-            let minimizes = min_ent.is_better(cur_ent);
+        // Use the same chunked iteration approach
+        let self_storage = self.present_bitmap.as_raw_slice();
+        let coverage_storage = coverage.non_zero_bitmap.as_raw_slice();
+        let max_chunks = self_storage.len().max(coverage_storage.len());
 
-            // fast path out ASAP if at all possible
-            if minimizes.any() {
-                let index_min = minimizes.to_array().iter().position(|&x| x).unwrap();
-                return Some(InterestReason::Minimizes {
-                    index: LANES * pos + index_min,
-                    old: min_ent.get().to_array()[index_min].into(),
-                    new: cur_ent.to_array()[index_min].into(),
-                });
+        for chunk_idx in 0..max_chunks {
+            let self_chunk = self_storage.get(chunk_idx).copied().unwrap_or(0);
+            let cov_chunk = coverage_storage.get(chunk_idx).copied().unwrap_or(0);
+            let union_chunk = self_chunk | cov_chunk;
+
+            if union_chunk == 0 {
+                continue;
             }
-            drop(tr_detailed_check_minimizes); // log time
 
-            let tr_detailed_check_maximizes = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check--maximizes");
-            let maximizes = max_ent.is_better(cur_ent);
-            if maximizes.any() {
-                let index_max = maximizes.to_array().iter().position(|&x| x).unwrap();
-                return Some(InterestReason::Maximizes {
-                    index: LANES * pos + index_max,
-                    old: max_ent.get().to_array()[index_max].into(),
-                    new: cur_ent.to_array()[index_max].into(),
-                });
+            let mut remaining = union_chunk;
+            while remaining != 0 {
+                let bit_offset = remaining.trailing_zeros() as usize;
+                let pos = chunk_idx * (usize::BITS as usize) + bit_offset;
+
+                if pos < self.map.len() {
+                    let (min_ent, max_ent) = &self.map[pos];
+                    let cur_ent = coverage.map[pos];
+
+                    let tr_detailed_check_minimizes = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check--minimizes");
+                    let minimizes = min_ent.is_better(cur_ent);
+
+                    // fast path out ASAP if at all possible
+                    if minimizes.any() {
+                        let index_min = minimizes.to_array().iter().position(|&x| x).unwrap();
+                        return Some(InterestReason::Minimizes {
+                            index: LANES * pos + index_min,
+                            old: min_ent.get().to_array()[index_min].into(),
+                            new: cur_ent.to_array()[index_min].into(),
+                        });
+                    }
+                    drop(tr_detailed_check_minimizes); // log time
+
+                    let tr_detailed_check_maximizes = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check--maximizes");
+                    let maximizes = max_ent.is_better(cur_ent);
+                    if maximizes.any() {
+                        let index_max = maximizes.to_array().iter().position(|&x| x).unwrap();
+                        return Some(InterestReason::Maximizes {
+                            index: LANES * pos + index_max,
+                            old: max_ent.get().to_array()[index_max].into(),
+                            new: cur_ent.to_array()[index_max].into(),
+                        });
+                    }
+                    drop(tr_detailed_check_maximizes); // log time
+                }
+
+                remaining &= remaining - 1;
             }
-            drop(tr_detailed_check_maximizes); // log time
         }
         return None;
     }

@@ -46,6 +46,14 @@ impl MinimizingVectorizedCounter {
         let result = val.simd_lt(self.0);
         result
     }
+
+    /// Combined check: returns true if val is better than either min or max
+    /// This is faster than calling is_better on both separately
+    #[inline(always)]
+    pub fn is_better_combined(min: &Self, max: &MaximizingVectorizedCounter, val: VectorizedCounter) -> CounterCondMask {
+        val.simd_lt(min.0) | val.simd_gt(max.0)
+    }
+
     #[inline(always)]
     pub fn update_min(&mut self, value: VectorizedCounter) {
         self.0 = self.0.simd_min(value);
