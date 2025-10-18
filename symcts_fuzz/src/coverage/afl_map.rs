@@ -195,7 +195,7 @@ where
         exit_kind: &libafl::executors::ExitKind,
     ) -> Result<bool, libafl::Error>
     {
-        let tr_full = TimeRecorder::new("symcts_feedback_is_interesting_total");
+        let tr_full = TimeRecorder::new("symcts_feedback_is_interesting");
         log::debug!(target: "symcts_feedback", "Target reported exit kind of {:?}", exit_kind);
         let branches_before = { state.metadata::<SyMCTSGlobalMetadata>().unwrap().coverage_point_info.len() };
 
