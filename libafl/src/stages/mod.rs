@@ -27,6 +27,8 @@ use libafl_bolts::{
     tuples::{HasConstLen, IntoVec},
     Named,
 };
+#[cfg(feature = "std")]
+use libafl_bolts::timerecorder::TimeRecorder;
 pub use logics::*;
 pub use mutational::{MutationalStage, StdMutationalStage};
 pub use power::{PowerMutationalStage, StdPowerMutationalStage};
@@ -174,7 +176,7 @@ where
 
 impl<Head, Tail, E, EM, Z> StagesTuple<E, EM, Head::State, Z> for (Head, Tail)
 where
-    Head: Stage<E, EM, Z>,
+    Head: Stage<E, EM, Z> + Named,
     Tail: StagesTuple<E, EM, Head::State, Z> + HasConstLen,
     E: UsesState<State = Head::State>,
     EM: UsesState<State = Head::State> + EventProcessor<E, Z>,
@@ -199,6 +201,11 @@ where
                 // perform the stage, but don't set it
                 let stage = &mut self.0;
 
+                #[cfg(feature = "std")]
+                let stage_name = alloc::format!("Stage::{}", stage.name());
+                #[cfg(feature = "std")]
+                let _tr = TimeRecorder::new(&stage_name);
+
                 stage.perform_restartable(fuzzer, executor, state, manager)?;
 
                 state.clear_stage()?;
@@ -211,6 +218,12 @@ where
                 state.set_current_stage_idx(StageId(Self::LEN))?;
 
                 let stage = &mut self.0;
+
+                #[cfg(feature = "std")]
+                let stage_name = alloc::format!("Stage::{}", stage.name());
+                #[cfg(feature = "std")]
+                let _tr = TimeRecorder::new(&stage_name);
+
                 stage.perform_restartable(fuzzer, executor, state, manager)?;
 
                 state.clear_stage()?;
