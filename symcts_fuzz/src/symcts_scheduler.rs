@@ -179,7 +179,7 @@ where
         let scheduled = ids.into_iter().next();
 
         log::debug!(target: "symcts_scheduler", "scheduled: {:?}", scheduled);
-        drop(tr_scheduler_selection);
+        drop(tr_scheduler_select_coverage_point);
 
 
         let sched_log_path = global_meta.sync_dir.join(".scheduler.log");
