@@ -149,7 +149,7 @@ pub trait SyMCTSTestCaseAnnotationFeedback
             let reason = if let Some(tracker) = &cov_info.coverage_min_max_tracker {
                 use crate::util::TimeRecorder;
 
-                let tr_is_interesting_internal = TimeRecorder::new("symcts_feedback_record_metadata--is_interesting_internal");
+                let _tr_is_interesting_internal = TimeRecorder::new("symcts_feedback_record_metadata--is_interesting_internal"); // records drop on exit from frame
                 tracker.is_interesting_for(&cur_cov)
             } else {
                 Some(InterestReason::Novel)
