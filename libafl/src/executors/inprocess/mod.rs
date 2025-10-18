@@ -17,6 +17,8 @@ use core::{
 };
 
 use libafl_bolts::tuples::{tuple_list, RefIndexable};
+#[cfg(feature = "std")]
+use libafl_bolts::timerecorder::TimeRecorder;
 
 #[cfg(any(unix, feature = "std"))]
 use crate::executors::hooks::inprocess::GLOBAL_STATE;
@@ -126,18 +128,41 @@ where
         mgr: &mut EM,
         input: &Self::Input,
     ) -> Result<ExitKind, Error> {
+        #[cfg(feature = "std")]
+        let _tr = TimeRecorder::new("InProcessExecutor::run_target");
+
         *state.executions_mut() += 1;
         unsafe {
             let executor_ptr = ptr::from_ref(self) as *const c_void;
+
+            #[cfg(feature = "std")]
+            let _tr_enter = TimeRecorder::new("InProcessExecutor::run_target::enter_target");
             self.inner
                 .enter_target(fuzzer, state, mgr, input, executor_ptr);
         }
+
+        #[cfg(feature = "std")]
+        let _tr_pre_exec = TimeRecorder::new("InProcessExecutor::run_target::pre_exec_all");
         self.inner.hooks.pre_exec_all(state, input);
+        #[cfg(feature = "std")]
+        drop(_tr_pre_exec);
 
+        #[cfg(feature = "std")]
+        let _tr_harness = TimeRecorder::new("InProcessExecutor::run_target::harness");
         let ret = self.harness_fn.borrow_mut()(input);
+        #[cfg(feature = "std")]
+        drop(_tr_harness);
 
+        #[cfg(feature = "std")]
+        let _tr_post_exec = TimeRecorder::new("InProcessExecutor::run_target::post_exec_all");
         self.inner.hooks.post_exec_all(state, input);
+        #[cfg(feature = "std")]
+        drop(_tr_post_exec);
+
+        #[cfg(feature = "std")]
+        let _tr_leave = TimeRecorder::new("InProcessExecutor::run_target::leave_target");
         self.inner.leave_target(fuzzer, state, mgr, input);
+
         Ok(ret)
     }
 }

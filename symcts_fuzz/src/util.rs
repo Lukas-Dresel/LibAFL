@@ -31,14 +31,9 @@
 
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::Path;
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
-use once_cell::sync::Lazy;
 
 use libafl::inputs::HasTargetBytes;
 use libafl_bolts::prelude::AsSlice;
-use itertools::Itertools;
 
 pub fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut hasher = ahash::RandomState::with_seeds(0, 0, 0, 0).build_hasher();
@@ -81,83 +76,10 @@ pub fn ensure_baseline_inputs_exist(dir: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-
-struct TimeTracker {
-    times: HashMap<String, u128>,
-    last_dumped: Instant,
-    start_time: Instant,
-}
-
-// simple global timing map: auto-creates entries on first record
-static COVERAGE_STAGE_TIMES: Lazy<Mutex<TimeTracker>> = Lazy::new(|| {
-    Mutex::new(TimeTracker {
-        times: HashMap::new(),
-        last_dumped: Instant::now(),
-        start_time: Instant::now(),
-    })
-});
-
-pub fn dump_total_time_snapshot() {
-    let tracker = COVERAGE_STAGE_TIMES.lock().unwrap();
-    let snapshot_path = "/tmp/symcts_times_snapshot.txt";
-    let mut snapshot_content = String::new();
-    for (slot_name, total_ns) in tracker.times.iter().sorted() {
-        snapshot_content.push_str(&format!("{}: {}\n", slot_name, total_ns))
-    }
-    snapshot_content.push_str(&format!("total_time: {}\n", tracker.start_time.elapsed().as_nanos()));
-    std::fs::write(snapshot_path, &snapshot_content).unwrap();
-    eprintln!("Final time snapshot written to {}:\n{}", snapshot_path, snapshot_content);
-}
-pub fn dump_percentage_time_snapshot() {
-    let tracker = COVERAGE_STAGE_TIMES.lock().unwrap();
-    let total_time_ns: u128 = tracker.times.values().sum();
-    let snapshot_path = "/tmp/symcts_times_snapshot_percentages.txt";
-    let mut snapshot_content = String::new();
-    for (slot_name, total_ns) in tracker.times.iter().sorted() {
-        let percentage = (*total_ns as f64 / total_time_ns as f64) * 100.0;
-        snapshot_content.push_str(&format!("{}: {}\n", slot_name, percentage))
-    }
-    snapshot_content.push_str(&format!("total_time: {}\n", total_time_ns));
-    std::fs::write(snapshot_path, &snapshot_content).unwrap();
-    eprintln!("Final percentage time snapshot written to {}:\n{}", snapshot_path, snapshot_content);
-}
-/// Record elapsed time `duration` into the named slot (accumulated in ns).
-/// Creates the slot if it does not yet exist and dumps a snapshot to /tmp/symcts_times_snapshot.txt and stderr.
-pub fn add_time_for_slot(name: &str, elapsed: Duration) {
-    let mut tracker = COVERAGE_STAGE_TIMES.lock().unwrap();
-    let entry = tracker.times.entry(name.to_string()).or_insert(0);
-    *entry += elapsed.as_nanos();
-
-    // Dump snapshot if more than 10 seconds passed since last dump
-    if tracker.last_dumped.elapsed() > Duration::from_secs(10) {
-        tracker.last_dumped = Instant::now();
-        drop(tracker); // release lock
-        dump_total_time_snapshot();
-        dump_percentage_time_snapshot();
-    }
-}
-
-// A simple object that measures elapsed time and records it into a named slot on drop
-pub struct TimeRecorder {
-    name: String,
-    start: Instant,
-}
-impl TimeRecorder {
-    pub fn new(name: &str) -> Self {
-        TimeRecorder {
-            name: name.to_string(),
-            start: Instant::now(),
-        }
-    }
-    pub fn record_time(&self) {
-        add_time_for_slot(&self.name, self.start.elapsed());
-    }
-    pub fn elapsed(&self) -> Duration {
-        self.start.elapsed()
-    }
-}
-impl Drop for TimeRecorder {
-    fn drop(&mut self) {
-        self.record_time();
-    }
-}
+// Re-export time recording utilities from libafl_bolts
+pub use libafl_bolts::timerecorder::{
+    TimeRecorder,
+    add_time_for_slot,
+    dump_total_time_snapshot,
+    dump_percentage_time_snapshot,
+};

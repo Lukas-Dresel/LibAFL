@@ -133,6 +133,8 @@ pub mod shmem;
 pub mod staterestore;
 #[cfg(feature = "alloc")]
 pub mod subrange;
+#[cfg(feature = "std")]
+pub mod timerecorder;
 // TODO: reenable once ahash works in no-alloc
 #[cfg(any(feature = "xxh3", feature = "alloc"))]
 pub mod tuples;
