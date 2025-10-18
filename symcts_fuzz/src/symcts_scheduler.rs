@@ -18,7 +18,7 @@ use rand::prelude::SliceRandom;
 use crate::coverage::{CoveragePoint, CoverageSummary};
 use crate::metadata::global::{SyMCTSGlobalMetadata, CoverageLocationInfo, register_new_interesting_inputs, register_symbolic_sampling_of_testcase};
 use crate::symcts_mutations::MutationResultMetadata;
-use crate::util::hash_target_bytes_input;
+use crate::util::{hash_target_bytes_input, TimeRecorder};
 
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -71,7 +71,7 @@ pub fn len_time_mul_score(exec_time_millis: usize, len: usize) -> f64 {
 }
 
 fn input_len<I, C: Corpus<Input=I>>(corpus: &C, id: CorpusId) -> usize
-where 
+where
     I: HasLen + Input,
 {
     corpus
@@ -86,7 +86,7 @@ where
 
 impl<S: State, SC> UsesState for SyMCTSScheduler<S, SC> {
     type State = S;
-} 
+}
 
 impl<I, S, SC> Scheduler for SyMCTSScheduler<S, SC>
 where
@@ -95,9 +95,14 @@ where
     SC: Scheduler<State=S>
 {
     fn next(&mut self, state: &mut S) -> Result<CorpusId, Error> {
-        let inner_next = self.inner_scheduler.next(state)?;
-        let _ignored = inner_next; // we don't actually use the inner scheduler's choice, we use our own. We just let it track data.
-        
+        let tr_total = TimeRecorder::new("SyMCTSScheduler::next");
+
+        {
+            let tr_inner_scheduler = TimeRecorder::new("SyMCTSScheduler::next--0-inner scheduler");
+            let inner_next = self.inner_scheduler.next(state)?;
+            let _ignored = inner_next; // we don't actually use the inner scheduler's choice, we use our own. We just let it track data.
+        }
+
         assert!(!state.corpus().is_empty());
         let (_rand, corpus, state_metadata) = state.get_state_components_rand_corpus_metadata();
         let global_meta: &mut SyMCTSGlobalMetadata =
@@ -110,12 +115,14 @@ where
 
         let _current_tick = global_meta.total_num_times_sampled;
 
+        let tr_get_covered_ids = TimeRecorder::new("SyMCTSScheduler::next--1-get_covered_ids");
         let covered_ids = global_meta
             .coverage_point_info
             .iter_mut()
             .filter(|(_, cov_info)| cov_info
                                         .filtered_covering_corpus_ids(|&id| num_times_mutated(corpus, id) == 0)
                                         .len() > 0);
+        drop(tr_get_covered_ids);
 
         #[cfg(feature="scheduling_weight_function_sampling_counts")]
         let weight_function = |(_cov_point, cov_info): &(&CoveragePoint, &mut CoverageLocationInfo)|  {
@@ -146,6 +153,7 @@ where
             num_not_mutated
         };
 
+        let tr_scheduler_select_coverage_point = TimeRecorder::new("SyMCTSScheduler::next--2-scheduler-select-coverage-point");
         let mut ids = covered_ids
             .collect::<Vec<_>>();
         ids.shuffle(&mut rand::thread_rng());
@@ -171,6 +179,7 @@ where
         let scheduled = ids.into_iter().next();
 
         log::debug!(target: "symcts_scheduler", "scheduled: {:?}", scheduled);
+        drop(tr_scheduler_selection);
 
 
         let sched_log_path = global_meta.sync_dir.join(".scheduler.log");
@@ -180,7 +189,7 @@ where
                     .as_secs();
 
         if let Some((scheduled_coverage_point, scheduled_coverage_info)) = scheduled {
-
+            let tr_scheduler_select_corpus_entry = TimeRecorder::new("SyMCTSScheduler::next--3-scheduler-select-corpus-entry");
             //////////////////////////////////////////////
             // println!("scheduled_coverage_info={:?}", scheduled_coverage_info);
             // randomly pick a corpusid from scheduled_coverage_info.coverage_min_max_tracker.corpus()
@@ -193,6 +202,7 @@ where
                 .collect::<Vec<_>>()
             );
 
+            let tr_scheduler_get_untraced_corpus = TimeRecorder::new("SyMCTSScheduler::next--4-get-untraced-corpus");
             let untraced_corpus = untraced_corpus
                 .into_iter()
                 .map(|id| {
@@ -202,6 +212,7 @@ where
                     (id, trace_len, input_length, exec_time)
                 })
                 .collect::<Vec<_>>();
+            drop(tr_scheduler_get_untraced_corpus);
             let minmax_result = untraced_corpus.iter().map(|x| x.1).minmax();
             let least_covered_id = match minmax_result {
                 MinMaxResult::NoElements => panic!("no elements in untraced corpus"),
@@ -258,13 +269,13 @@ where
             global_meta.last_scheduled = Some((scheduled_coverage_point.clone(), least_covered_id.clone()));
 
             let (input_len, execution_time_millis) = input_length_and_exec_time(corpus, least_covered_id)?;
-            log::info!(target: "symcts_scheduler", "Scheduling input {:?} with length {} and exec_time_millis {} (avg={})", 
-                least_covered_id, 
-                input_len, 
-                execution_time_millis, 
+            log::info!(target: "symcts_scheduler", "Scheduling input {:?} with length {} and exec_time_millis {} (avg={})",
+                least_covered_id,
+                input_len,
+                execution_time_millis,
                 (scheduled_coverage_info.time_spent_tracing_millis as f64) / scheduled_coverage_info.num_times_coverage_traced.max(1) as f64
             );
-            
+
             register_symbolic_sampling_of_testcase(state, least_covered_id, input_len, execution_time_millis);
             return Ok(least_covered_id.clone());
         }
@@ -290,8 +301,13 @@ where
     }
 
     fn on_add(&mut self, state: &mut S, inserted_idx: CorpusId) -> Result<(), libafl::Error> {
+        let tr_scheduler_on_add_full = TimeRecorder::new("SyMCTSScheduler::on_add");
+
+        let tr_scheduler_on_add_inner = TimeRecorder::new("SyMCTSScheduler::on_add--0-inner-scheduler");
         self.inner_scheduler.on_add(state, inserted_idx)?;
-        
+        drop(tr_scheduler_on_add_inner);
+
+        let tr_scheduler_get_testcase_info = TimeRecorder::new("SyMCTSScheduler::on_add--1-get-testcase-info");
         let (input_hash, input_len, execution_time_millis) = {
             let corpus = state.corpus();
             let mut testcase = corpus.get(inserted_idx).unwrap().borrow_mut();
@@ -300,6 +316,8 @@ where
             let input_hash = hash_target_bytes_input(testcase.load_input(corpus)?);
             (input_hash, input_len, exec_time)
         };
+        drop(tr_scheduler_get_testcase_info);
+
         let global_meta = state
             .metadata_mut::<SyMCTSGlobalMetadata>()
             .expect("No global metadata set??");
@@ -311,7 +329,9 @@ where
             .take()
             .expect("The scheduler on_add should only run after the feedback has populated its last_cov.");
 
+        let tr_scheduler_register_new_inputs = TimeRecorder::new("SyMCTSScheduler::on_add--2-register-new-interesting-inputs");
         register_new_interesting_inputs(state, vec![(inserted_idx, cov_summary, single_cov, input_len as usize, execution_time_millis as usize)]);
+        drop(tr_scheduler_register_new_inputs);
         state
             .corpus_mut()
             .get(inserted_idx)
