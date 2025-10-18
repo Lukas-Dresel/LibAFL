@@ -19,6 +19,8 @@ use libafl_bolts::{
     tuples::{Handle, Handled, MatchNameRef},
     Named,
 };
+#[cfg(all(feature = "std", feature = "introspection"))]
+use libafl_bolts::timerecorder::TimeRecorder;
 pub use list::*;
 pub use map::*;
 #[cfg(feature = "nautilus")]
@@ -98,6 +100,11 @@ where
         EM: EventFirer<State = S>,
         OT: ObserversTuple<S>,
     {
+        #[cfg(feature = "std")]
+        let feedback_name = alloc::format!("Feedback::{}", self.name());
+        #[cfg(feature = "std")]
+        let _tr = TimeRecorder::new(&feedback_name);
+
         // Start a timer for this feedback
         let start_time = libafl_bolts::cpu::read_time_counter();
 
