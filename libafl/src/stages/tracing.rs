@@ -7,6 +7,8 @@ use alloc::{
 use core::{fmt::Debug, marker::PhantomData};
 
 use libafl_bolts::Named;
+#[cfg(feature = "std")]
+use libafl_bolts::timerecorder::TimeRecorder;
 
 use crate::{
     executors::{Executor, HasObservers, ShadowExecutor},
@@ -53,24 +55,35 @@ where
         state: &mut <Self as UsesState>::State,
         manager: &mut EM,
     ) -> Result<(), Error> {
+        #[cfg(feature = "std")]
+        let _tr = TimeRecorder::new("TracingStage::trace");
+
         start_timer!(state);
         let input = state.current_input_cloned()?;
 
         mark_feature_time!(state, PerfFeature::GetInputFromCorpus);
 
         start_timer!(state);
+        #[cfg(feature = "std")]
+        let _tr_pre_exec = TimeRecorder::new("TracingStage::trace::pre_exec_all");
         self.tracer_executor
             .observers_mut()
             .pre_exec_all(state, &input)?;
         mark_feature_time!(state, PerfFeature::PreExecObservers);
 
         start_timer!(state);
+        #[cfg(feature = "std")]
+        let _tr_run_target = TimeRecorder::new("TracingStage::trace::run_target");
         let exit_kind = self
             .tracer_executor
             .run_target(fuzzer, state, manager, &input)?;
+        #[cfg(feature = "std")]
+        drop(_tr_run_target);
         mark_feature_time!(state, PerfFeature::TargetExecution);
 
         start_timer!(state);
+        #[cfg(feature = "std")]
+        let _tr_post_exec = TimeRecorder::new("TracingStage::trace::post_exec_all");
         self.tracer_executor
             .observers_mut()
             .post_exec_all(state, &input, &exit_kind)?;
@@ -191,12 +204,17 @@ where
         state: &mut <Self as UsesState>::State,
         manager: &mut EM,
     ) -> Result<(), Error> {
+        #[cfg(feature = "std")]
+        let _tr = TimeRecorder::new("ShadowTracingStage::perform");
+
         start_timer!(state);
         let input = state.current_input_cloned()?;
 
         mark_feature_time!(state, PerfFeature::GetInputFromCorpus);
 
         start_timer!(state);
+        #[cfg(feature = "std")]
+        let _tr_pre_exec = TimeRecorder::new("ShadowTracingStage::perform::pre_exec_all");
         executor
             .shadow_observers_mut()
             .pre_exec_all(state, &input)?;
@@ -204,10 +222,16 @@ where
         mark_feature_time!(state, PerfFeature::PreExecObservers);
 
         start_timer!(state);
+        #[cfg(feature = "std")]
+        let _tr_run_target = TimeRecorder::new("ShadowTracingStage::perform::run_target");
         let exit_kind = executor.run_target(fuzzer, state, manager, &input)?;
+        #[cfg(feature = "std")]
+        drop(_tr_run_target);
         mark_feature_time!(state, PerfFeature::TargetExecution);
 
         start_timer!(state);
+        #[cfg(feature = "std")]
+        let _tr_post_exec = TimeRecorder::new("ShadowTracingStage::perform::post_exec_all");
         executor
             .shadow_observers_mut()
             .post_exec_all(state, &input, &exit_kind)?;
