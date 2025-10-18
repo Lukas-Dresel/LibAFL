@@ -130,17 +130,8 @@ pub trait SyMCTSTestCaseAnnotationFeedback
         let time_before_interestingness_check = std::time::Instant::now();
         let tr_interesting = TimeRecorder::new("symcts_feedback_record_metadata--check_interestingness");
         for cov_point in &coverage_summary.points {
-            let cov_info = global_state.coverage_point_info.entry(cov_point.clone()).or_insert_with(|| {
-                let cov_info = CoverageLocationInfo {
-                    coverage_min_max_tracker: None,
-                    num_times_coverage_traced: 0,
-                    num_times_symbolically_sampled: 0,
-                    time_spent_sampling_millis: 0,
-                    time_spent_tracing_millis: 0,
-                    tick_last_seen_mutated: 0,
-                };
-                cov_info
-            });
+            let branch_idx = cov_point.branch_index;
+            let cov_info = global_state.get_or_insert_coverage_info(branch_idx);
 
             cov_info.time_spent_tracing_millis += exec_time_millis;
             cov_info.num_times_coverage_traced += 1;

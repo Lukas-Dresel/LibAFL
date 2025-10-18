@@ -117,22 +117,29 @@ where
 
         let tr_get_covered_ids = TimeRecorder::new("SyMCTSScheduler::next--1-get_covered_ids");
         let covered_ids = global_meta
-            .coverage_point_info
-            .iter_mut()
-            .filter(|(_, cov_info)| cov_info
-                                        .filtered_covering_corpus_ids(|&id| num_times_mutated(corpus, id) == 0)
-                                        .len() > 0);
+            .covered_branch_indices()
+            .filter_map(|branch_idx| {
+                let cov_info = &global_meta.coverage_point_info[branch_idx];
+                if let Some(info) = cov_info {
+                    if info.filtered_covering_corpus_ids(|&id| num_times_mutated(corpus, id) == 0).len() > 0 {
+                        return Some(branch_idx);
+                    }
+                }
+                None
+            });
         drop(tr_get_covered_ids);
 
         #[cfg(feature="scheduling_weight_function_sampling_counts")]
-        let weight_function = |(_cov_point, cov_info): &(&CoveragePoint, &mut CoverageLocationInfo)|  {
+        let weight_function = |branch_idx: &usize|  {
+            let cov_info = global_meta.coverage_point_info[*branch_idx].as_ref().unwrap();
             let weight_sampled = (cov_info.num_times_symbolically_sampled * 100).pow(2);
             let weight_traced = cov_info.num_times_coverage_traced;
             // let ticks_since_last_seen = (current_tick - cov_info.tick_last_seen_mutated);
             weight_sampled + weight_traced
         };
         #[cfg(feature="scheduling_weight_function_time_spent")]
-        let weight_function = |(_cov_point, cov_info): &(&CoveragePoint, &mut CoverageLocationInfo)|  {
+        let weight_function = |branch_idx: &usize|  {
+            let cov_info = global_meta.coverage_point_info[*branch_idx].as_ref().unwrap();
             log::debug!("time_spent_tracing_millis: {}, total_time_spent_tracing: {}",
                 cov_info.time_spent_tracing_millis,
                 global_time_spent_tracing
@@ -141,13 +148,15 @@ where
             time_score // the less absolute time spent, the higher the score, the more likely to be picked
         };
         // #[cfg(feature="scheduling_weight_function_percent_unmutated")]
-        // let weight_function = |(_cov_point, cov_info): &(&CoveragePoint, &mut CoverageLocationInfo)| {
+        // let weight_function = |branch_idx: &usize| {
+        //     let cov_info = global_meta.coverage_point_info[*branch_idx].as_ref().unwrap();
         //     let numerator = cov_info.filtered_covering_corpus_ids(|&id| num_times_mutated(corpus, id) == 0).len();
         //     let denominator = cov_info.coverage_min_max_tracker.corpus().len();
         //     ((numerator as f64 / denominator as f64) * 10000.) as usize
         // };
         #[cfg(feature="scheduling_weight_function_least_unmutated")]
-        let weight_function = |(_cov_point, cov_info): &(&CoveragePoint, &mut CoverageLocationInfo)| {
+        let weight_function = |branch_idx: &usize| {
+            let cov_info = global_meta.coverage_point_info[*branch_idx].as_ref().unwrap();
             let num_mutated = cov_info.filtered_covering_corpus_ids(|&id| num_times_mutated(corpus, id) > 0).len();
             let num_not_mutated = cov_info.coverage_min_max_tracker.corpus().len() - num_mutated;
             num_not_mutated
@@ -165,22 +174,22 @@ where
         // println!("ids={:?}", ids);
 
         #[cfg(feature="scheduling_weighted_minimum")]
-        let scheduled = ids
+        let scheduled_branch_idx = ids
             .into_iter()
             .min_by_key(weight_function);
 
         #[cfg(feature="scheduling_weighted_random")]
-        let scheduled = ids
+        let scheduled_branch_idx = ids
             .choose_weighted_mut(&mut rand::thread_rng(), |x| max_weight - weight_function(x))
             .ok()
+            .copied()
         ;
 
         #[cfg(feature="scheduling_uniform_random")]
-        let scheduled = ids.into_iter().next();
+        let scheduled_branch_idx = ids.into_iter().next();
 
-        log::debug!(target: "symcts_scheduler", "scheduled: {:?}", scheduled);
+        log::debug!(target: "symcts_scheduler", "scheduled: {:?}", scheduled_branch_idx);
         drop(tr_scheduler_select_coverage_point);
-
 
         let sched_log_path = global_meta.sync_dir.join(".scheduler.log");
         let cur_time = SystemTime::now()
@@ -188,13 +197,25 @@ where
                     .unwrap()
                     .as_secs();
 
-        if let Some((scheduled_coverage_point, scheduled_coverage_info)) = scheduled {
+        if let Some(scheduled_branch_idx) = scheduled_branch_idx {
+            let scheduled_coverage_point = CoveragePoint { branch_index: scheduled_branch_idx, bucketed_count: 0 };
+
+            // Extract the data we need from coverage_info before using global_meta elsewhere
+            let (untraced_corpus, time_spent_tracing, num_times_traced, num_times_sampled, all_corpus_ids) = {
+                let scheduled_coverage_info = global_meta.get_coverage_info(scheduled_branch_idx).unwrap();
+                (
+                    scheduled_coverage_info.filtered_covering_corpus_ids(|&id| num_times_mutated(corpus, id) == 0),
+                    scheduled_coverage_info.time_spent_tracing_millis,
+                    scheduled_coverage_info.num_times_coverage_traced,
+                    scheduled_coverage_info.num_times_symbolically_sampled,
+                    scheduled_coverage_info.coverage_min_max_tracker.as_ref().expect("should be set in on_add").corpus().clone(),
+                )
+            };
+
             let tr_scheduler_select_corpus_entry = TimeRecorder::new("SyMCTSScheduler::next--3-scheduler-select-corpus-entry");
             //////////////////////////////////////////////
             // println!("scheduled_coverage_info={:?}", scheduled_coverage_info);
             // randomly pick a corpusid from scheduled_coverage_info.coverage_min_max_tracker.corpus()
-            let untraced_corpus = scheduled_coverage_info
-                .filtered_covering_corpus_ids(|&id| num_times_mutated(corpus, id) == 0);
 
             log::debug!("avail_corpus={:?}", untraced_corpus
                 .iter()
@@ -235,7 +256,7 @@ where
                             let exec_time_millis = x.3;
                             let input_len = x.2;
                             let score = max_weight - len_time_mul_score(exec_time_millis, input_len) + 1.;
-                            let time_score = 1000usize.saturating_sub(((exec_time_millis as f64 / scheduled_coverage_info.time_spent_tracing_millis.max(1) as f64) * 1000.) as usize).max(1);
+                            let time_score = 1000usize.saturating_sub(((exec_time_millis as f64 / time_spent_tracing.max(1) as f64) * 1000.) as usize).max(1);
                             score * (time_score as f64)
                         }).unwrap().0;
                     id
@@ -250,19 +271,20 @@ where
                 .unwrap();
             file.write_all(format!("{}\t{}\t{}\t{:?}\t{:?}\t{:?}\n",
                 cur_time,
-                scheduled_coverage_info.num_times_symbolically_sampled,
-                scheduled_coverage_info.num_times_coverage_traced,
+                num_times_sampled,
+                num_times_traced,
                 scheduled_coverage_point,
                 least_covered_id,
-                scheduled_coverage_info.coverage_min_max_tracker.as_ref().expect("should be set in on_add").corpus()).as_bytes()
+                &all_corpus_ids).as_bytes()
             ).unwrap();
             log::info!(
                 target: "symcts_scheduler",
-                "Picked: {:#?}: {:#?} => {:#?} [#corpus: {:?}, #untraced: {:?}]",
+                "Picked: {:#?}: sampled={}, traced={} => {:#?} [#corpus: {:?}, #untraced: {:?}]",
                 &scheduled_coverage_point,
-                &scheduled_coverage_info,
+                num_times_sampled,
+                num_times_traced,
                 &least_covered_id,
-                scheduled_coverage_info.coverage_min_max_tracker.as_ref().expect("should be set in on_add").corpus().len(),
+                all_corpus_ids.len(),
                 untraced_corpus.len(),
             );
 
@@ -273,7 +295,7 @@ where
                 least_covered_id,
                 input_len,
                 execution_time_millis,
-                (scheduled_coverage_info.time_spent_tracing_millis as f64) / scheduled_coverage_info.num_times_coverage_traced.max(1) as f64
+                (time_spent_tracing as f64) / num_times_traced.max(1) as f64
             );
 
             register_symbolic_sampling_of_testcase(state, least_covered_id, input_len, execution_time_millis);

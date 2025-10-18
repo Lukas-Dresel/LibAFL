@@ -5,6 +5,8 @@ use crate::symcts_mutations::{MutationSource, MutationResultMetadata};
  #[cfg(feature = "coverage_single_level")]
 use crate::coverage::vectorized_coverage_map::VectorizedCoverage;
 
+use bitvec::vec::BitVec;
+
 #[cfg(feature="resource_tracking")]
 use crate::resource_monitoring::{
     ResourceUsageMetadata,
@@ -95,10 +97,12 @@ impl CoverageLocationInfo {
 }
 
 // TODO maybe use bignums instead of just usize, for now use `checked_add` to see if necessary
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SyMCTSGlobalMetadata {
     pub sync_dir: PathBuf,
-    pub coverage_point_info: HashMap<CoveragePoint, CoverageLocationInfo>,
+    // Indexed by branch_index, with BitVec for fast iteration over covered branches
+    pub coverage_point_info: Vec<Option<CoverageLocationInfo>>,
+    pub coverage_present_bitmap: BitVec,
     pub total_num_times_sampled: usize,
     pub total_num_times_traced: usize,
     pub total_time_spent_sampling_millis: usize,
@@ -116,6 +120,30 @@ pub struct SyMCTSGlobalMetadata {
     pub tracked_resources: ResourceUsageMetadata,
 }
 libafl_bolts::impl_serdeany!(SyMCTSGlobalMetadata);
+
+impl Default for SyMCTSGlobalMetadata {
+    fn default() -> Self {
+        Self {
+            sync_dir: PathBuf::default(),
+            coverage_point_info: Vec::new(),
+            coverage_present_bitmap: BitVec::new(),
+            total_num_times_sampled: 0,
+            total_num_times_traced: 0,
+            total_time_spent_sampling_millis: 0,
+            total_time_spent_tracing_millis: 0,
+            total_num_times_crashed: 0,
+            total_num_times_timed_out: 0,
+            synced_inputs_queue: Vec::new(),
+            last_tick_seen_new_branch: 0,
+            last_scheduled: None,
+            current_mutation_source: None,
+            last_traced_cov: None,
+            hash_to_corpus_id: HashMap::new(),
+            #[cfg(feature="resource_tracking")]
+            tracked_resources: ResourceUsageMetadata::default(),
+        }
+    }
+}
 
 impl SyMCTSGlobalMetadata {
     pub fn current_tick(&self) -> usize {
@@ -136,6 +164,56 @@ impl SyMCTSGlobalMetadata {
     }
     pub fn reset_stuck_counter(&mut self) {
         self.last_tick_seen_new_branch = self.current_tick();
+    }
+
+    /// Get coverage info for a branch index, returns None if not covered
+    #[inline(always)]
+    pub fn get_coverage_info(&self, branch_index: usize) -> Option<&CoverageLocationInfo> {
+        self.coverage_point_info.get(branch_index)?.as_ref()
+    }
+
+    /// Get mutable coverage info for a branch index, returns None if not covered
+    #[inline(always)]
+    pub fn get_coverage_info_mut(&mut self, branch_index: usize) -> Option<&mut CoverageLocationInfo> {
+        self.coverage_point_info.get_mut(branch_index)?.as_mut()
+    }
+
+    /// Ensure space exists for branch_index and return mutable reference, creating if necessary
+    pub fn get_or_insert_coverage_info(&mut self, branch_index: usize) -> &mut CoverageLocationInfo {
+        // Ensure Vec is large enough
+        if branch_index >= self.coverage_point_info.len() {
+            self.coverage_point_info.resize(branch_index + 1, None);
+        }
+        // Ensure BitVec is large enough
+        if branch_index >= self.coverage_present_bitmap.len() {
+            self.coverage_present_bitmap.resize(branch_index + 1, false);
+        }
+
+        // Get or create the entry
+        let entry = &mut self.coverage_point_info[branch_index];
+        if entry.is_none() {
+            *entry = Some(CoverageLocationInfo {
+                num_times_symbolically_sampled: 0,
+                num_times_coverage_traced: 0,
+                time_spent_sampling_millis: 0,
+                time_spent_tracing_millis: 0,
+                tick_last_seen_mutated: 0,
+                coverage_min_max_tracker: None,
+            });
+            self.coverage_present_bitmap.set(branch_index, true);
+        }
+
+        entry.as_mut().unwrap()
+    }
+
+    /// Count of covered branches
+    pub fn num_covered_branches(&self) -> usize {
+        self.coverage_present_bitmap.count_ones()
+    }
+
+    /// Iterate over all covered branch indices
+    pub fn covered_branch_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.coverage_present_bitmap.iter_ones()
     }
 }
 
@@ -178,8 +256,7 @@ where
     global_meta.increment_tick();
     for cov_point in cov_summary.points.iter() {
         let v = global_meta
-            .coverage_point_info
-            .get_mut(cov_point)
+            .get_coverage_info_mut(cov_point.branch_index)
             .unwrap_or_else(|| {
                 panic!(
                     "Coverage point {:?} from {:?} not found in global metadata when trying to register symbolic sampling, should always have been added when it was first traced instead!", cov_point, sampled_id);
@@ -206,23 +283,27 @@ where
 
         // println!("Traced input: {:?}, tc_meta: {:?}", testcase.input(), &tc_meta);
         for cov_point in cov_summary.points.iter() {
-            let cov_info = global_meta
-                .coverage_point_info
-                .entry(cov_point.clone())
-                .or_insert_with(|| CoverageLocationInfo {
-                    num_times_symbolically_sampled: 0,
-                    num_times_coverage_traced: 1,
-                    tick_last_seen_mutated: 0,
-                    time_spent_sampling_millis: 0,
-                    time_spent_tracing_millis: exec_time_millis,
+            let branch_index = cov_point.branch_index;
 
-                    #[cfg(not(feature = "coverage_single_level"))]
-                    coverage_min_max_tracker: Some(CoverageMinMaxTracker::create(
+            // Check if this is a new branch
+            let is_new = global_meta.get_coverage_info(branch_index).is_none();
+
+            let cov_info = if is_new {
+                // Create new entry for this branch
+                let info = global_meta.get_or_insert_coverage_info(branch_index);
+                info.num_times_coverage_traced = 1;
+                info.time_spent_tracing_millis = exec_time_millis;
+
+                #[cfg(not(feature = "coverage_single_level"))]
+                {
+                    info.coverage_min_max_tracker = Some(CoverageMinMaxTracker::create(
                         &cov_map,
                         corpus_id
-                    )),
-                    #[cfg(feature = "coverage_single_level")]
-                    coverage_min_max_tracker: Some(
+                    ));
+                }
+                #[cfg(feature = "coverage_single_level")]
+                {
+                    info.coverage_min_max_tracker = Some(
                         CoverageMinMaxTracker::create(
                             &VectorizedCoverage::from_element(
                                 cov_map.input_length_exponent,
@@ -230,8 +311,13 @@ where
                             ),
                             corpus_id
                         )
-                    )
-                });
+                    );
+                }
+                info
+            } else {
+                global_meta.get_coverage_info_mut(branch_index).unwrap()
+            };
+
             cov_info.update_testcase_for_newly_triggered_coverage_points(&cov_point, corpus_id, &cov_map);
             #[cfg(all(feature="resource_tracking", feature="resource_tracking_per_branch"))]
             update_resource_tracker_on_branch_corpus_addition(global_meta, corpus_id, input_size, cov_point);

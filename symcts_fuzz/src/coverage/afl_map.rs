@@ -197,7 +197,7 @@ where
     {
         let tr_full = TimeRecorder::new("symcts_feedback_is_interesting");
         log::debug!(target: "symcts_feedback", "Target reported exit kind of {:?}", exit_kind);
-        let branches_before = { state.metadata::<SyMCTSGlobalMetadata>().unwrap().coverage_point_info.len() };
+        let branches_before = { state.metadata::<SyMCTSGlobalMetadata>().unwrap().num_covered_branches() };
 
         let tr_is_interesting_get_coverage_points: TimeRecorder = TimeRecorder::new("symcts_feedback_is_interesting--get_coverage_points");
         let (cov_summary, single_cov) = self.get_coverage_points(input, observers)?;
@@ -218,7 +218,7 @@ where
         )?;
         drop(tr_symcts_afl_feedback_record_metadata); // log time
 
-        let branches_after = { state.metadata::<SyMCTSGlobalMetadata>().unwrap().coverage_point_info.len() };
+        let branches_after = { state.metadata::<SyMCTSGlobalMetadata>().unwrap().num_covered_branches() };
         assert!(branches_after >= branches_before);
 
         log::debug!(target: "symcts_feedback", "Coverage summary: {:?}", cov_summary);
@@ -228,9 +228,9 @@ where
                 state,
                 Event::UpdateUserStats {
                     name: "symcts_cov".into(),
-                    // value: UserStats::Ratio(num_cov_points as u64, state.metadata::<SyMCTSGlobalMetadata>().unwrap().coverage_point_info.len() as u64),
+                    // value: UserStats::Ratio(num_cov_points as u64, state.metadata::<SyMCTSGlobalMetadata>().unwrap().num_covered_branches() as u64),
                     value: UserStats::new(
-                        UserStatsValue::Number(state.metadata::<SyMCTSGlobalMetadata>().unwrap().coverage_point_info.len() as u64),
+                        UserStatsValue::Number(state.metadata::<SyMCTSGlobalMetadata>().unwrap().num_covered_branches() as u64),
                         AggregatorOps::None,
                     ),
                     phantom: PhantomData,

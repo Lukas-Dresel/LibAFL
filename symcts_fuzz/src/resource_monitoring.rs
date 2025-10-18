@@ -142,13 +142,15 @@ pub fn update_resource_tracker_on_scheduling(
     };
 
     let current_tick = global_meta.current_tick();
+    let last_tick_seen_new_branch = global_meta.last_tick_seen_new_branch;
+    let coverage_points_seen = global_meta.num_covered_branches();
 
     let resources = &mut global_meta.tracked_resources;
-    
+
     resources.time = SystemTime::now();
     resources.current_tick = current_tick;
-    resources.last_tick_seen_new_branch = global_meta.last_tick_seen_new_branch;
-    resources.coverage_points_seen = global_meta.coverage_point_info.len();
+    resources.last_tick_seen_new_branch = last_tick_seen_new_branch;
+    resources.coverage_points_seen = coverage_points_seen;
 
     resources.ram_usage_current = get_current_memory_usage();
     resources.ram_usage_max = resources.ram_usage_max.max(resources.ram_usage_current);
