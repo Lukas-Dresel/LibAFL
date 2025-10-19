@@ -118,15 +118,16 @@ where
         let tr_get_covered_ids = TimeRecorder::new("SyMCTSScheduler::next::1-get_covered_ids");
         let covered_ids = global_meta
             .covered_branch_indices()
-            .filter_map(|branch_idx| {
-                let cov_info = &global_meta.coverage_point_info[branch_idx];
-                if let Some(info) = cov_info {
-                    if info.filtered_covering_corpus_ids(|&id| num_times_mutated(corpus, id) == 0).len() > 0 {
-                        return Some(branch_idx);
-                    }
-                }
-                None
-            });
+            // .filter_map(|branch_idx| {
+            //     let cov_info = &global_meta.coverage_point_info[branch_idx];
+            //     if let Some(info) = cov_info {
+            //         if info.filtered_covering_corpus_ids(|&id| num_times_mutated(corpus, id) == 0).len() > 0 {
+            //             return Some(branch_idx);
+            //         }
+            //     }
+            //     None
+            // })
+            ;
         drop(tr_get_covered_ids);
 
         #[cfg(feature="scheduling_weight_function_sampling_counts")]
