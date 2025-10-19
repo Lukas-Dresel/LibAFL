@@ -163,8 +163,10 @@ where
         };
 
         let tr_scheduler_select_coverage_point = TimeRecorder::new("SyMCTSScheduler::next::2-scheduler-select-coverage-point");
+        let tr_scheduler_select_coverage_point_collect_covered_ids = TimeRecorder::new("SyMCTSScheduler::next::2-scheduler-select-coverage-point::collect_ids");
         let mut ids = covered_ids
             .collect::<Vec<_>>();
+        drop(tr_scheduler_select_coverage_point_collect_covered_ids);
 
         let tr_scheduler_select_coverage_point_shuffle = TimeRecorder::new("SyMCTSScheduler::next::2-scheduler-select-coverage-point::shuffle");
         ids.shuffle(&mut rand::thread_rng());
@@ -172,9 +174,12 @@ where
 
         #[cfg(feature="scheduling_weighted_random")]
         let max_weight = ids.iter().map(weight_function).max().unwrap_or(0) + 1;
+
+        let tr_scheduler_print = TimeRecorder::new("SyMCTSScheduler::next::2-scheduler-select-coverage-point::log");
         log::info!(target: "symcts_scheduler", "Scheduling among {} coverage points.", ids.len());
         log::info!(target: "symcts_scheduler", "Max weight among them: {}", max_weight);
         log::info!(target: "symcts_scheduler", "Weights: {:?}", ids.iter().map(weight_function).collect::<Vec<_>>());
+        drop(tr_scheduler_print);
         // println!("ids={:?}", ids);
 
         let tr_scheduler_get_scheduled_branch_index = TimeRecorder::new("SyMCTSScheduler::next::2-scheduler-select-coverage-point::select_weighted");
@@ -218,7 +223,7 @@ where
                 )
             };
 
-            let tr_scheduler_select_corpus_entry = TimeRecorder::new("SyMCTSScheduler::next--3-scheduler-select-corpus-entry");
+            let tr_scheduler_select_corpus_entry = TimeRecorder::new("SyMCTSScheduler::next::3-scheduler-select-corpus-entry");
             //////////////////////////////////////////////
             // println!("scheduled_coverage_info={:?}", scheduled_coverage_info);
             // randomly pick a corpusid from scheduled_coverage_info.coverage_min_max_tracker.corpus()
@@ -229,7 +234,7 @@ where
                 .collect::<Vec<_>>()
             );
 
-            let tr_scheduler_get_untraced_corpus = TimeRecorder::new("SyMCTSScheduler::next--4-get-untraced-corpus");
+            let tr_scheduler_get_untraced_corpus = TimeRecorder::new("SyMCTSScheduler::next::4-get-untraced-corpus");
             let untraced_corpus = untraced_corpus
                 .into_iter()
                 .map(|id| {
@@ -331,11 +336,11 @@ where
     fn on_add(&mut self, state: &mut S, inserted_idx: CorpusId) -> Result<(), libafl::Error> {
         let tr_scheduler_on_add_full = TimeRecorder::new("SyMCTSScheduler::on_add");
 
-        let tr_scheduler_on_add_inner = TimeRecorder::new("SyMCTSScheduler::on_add--0-inner-scheduler");
+        let tr_scheduler_on_add_inner = TimeRecorder::new("SyMCTSScheduler::on_add::0-inner-scheduler");
         self.inner_scheduler.on_add(state, inserted_idx)?;
         drop(tr_scheduler_on_add_inner);
 
-        let tr_scheduler_get_testcase_info = TimeRecorder::new("SyMCTSScheduler::on_add--1-get-testcase-info");
+        let tr_scheduler_get_testcase_info = TimeRecorder::new("SyMCTSScheduler::on_add::1-get-testcase-info");
         let (input_hash, input_len, execution_time_millis) = {
             let corpus = state.corpus();
             let mut testcase = corpus.get(inserted_idx).unwrap().borrow_mut();
@@ -357,7 +362,7 @@ where
             .take()
             .expect("The scheduler on_add should only run after the feedback has populated its last_cov.");
 
-        let tr_scheduler_register_new_inputs = TimeRecorder::new("SyMCTSScheduler::on_add--2-register-new-interesting-inputs");
+        let tr_scheduler_register_new_inputs = TimeRecorder::new("SyMCTSScheduler::on_add::2-register-new-interesting-inputs");
         register_new_interesting_inputs(state, vec![(inserted_idx, cov_summary, single_cov, input_len as usize, execution_time_millis as usize)]);
         drop(tr_scheduler_register_new_inputs);
         state
