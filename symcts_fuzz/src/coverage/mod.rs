@@ -128,7 +128,7 @@ pub trait SyMCTSTestCaseAnnotationFeedback
 
         let mut found = None;
         let time_before_interestingness_check = std::time::Instant::now();
-        let tr_interesting = TimeRecorder::new("symcts_feedback_record_metadata--check_interestingness");
+        let tr_interesting = TimeRecorder::new("symcts_feedback_record_metadata::check_interestingness");
         for cov_point in &coverage_summary.points {
             let branch_idx = cov_point.branch_index;
             let cov_info = global_state.get_or_insert_coverage_info(branch_idx);
@@ -140,7 +140,7 @@ pub trait SyMCTSTestCaseAnnotationFeedback
             let reason = if let Some(tracker) = &cov_info.coverage_min_max_tracker {
                 use crate::util::TimeRecorder;
 
-                let _tr_is_interesting_internal = TimeRecorder::new("symcts_feedback_record_metadata--is_interesting_internal"); // records drop on exit from frame
+                let _tr_is_interesting_internal = TimeRecorder::new("symcts_feedback_record_metadata::is_interesting_internal"); // records drop on exit from frame
                 tracker.is_interesting_for(&cur_cov)
             } else {
                 Some(InterestReason::Novel)
@@ -148,7 +148,7 @@ pub trait SyMCTSTestCaseAnnotationFeedback
 
             #[cfg(feature = "coverage_single_level")]
             let reason = if let Some(tracker) = &cov_info.coverage_min_max_tracker {
-                let tr_is_interesting_internal = TimeRecorder::new("symcts_feedback_record_metadata--is_interesting_internal");
+                let tr_is_interesting_internal = TimeRecorder::new("symcts_feedback_record_metadata::is_interesting_internal");
                 let tmp_cov = SingleCoverage::from_element(
                     cur_cov.input_length_exponent,
                     cur_cov.count_for_branch(cov_point.branch_index)

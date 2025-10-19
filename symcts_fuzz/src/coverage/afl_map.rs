@@ -146,7 +146,7 @@ impl<I> SyMCTSTestCaseAnnotationFeedback for SyMCTSAFLBitmapCoverageFeedback<I> 
                 std::any::type_name::<OT>(),
             )))?;
 
-        let tr_get_points_iter = TimeRecorder::new("get_coverage_points--getting_map_iter");
+        let tr_get_points_iter = TimeRecorder::new("get_coverage_points::getting_map_iter");
         let coverage_points = map_metadata
             .as_iter()
             .enumerate()
@@ -156,7 +156,7 @@ impl<I> SyMCTSTestCaseAnnotationFeedback for SyMCTSAFLBitmapCoverageFeedback<I> 
 
         // log::debug!(target: "symcts_feedback", "Coverage points: {:?}", coverage_points.iter().sorted().collect::<Vec<_>>());
 
-        let tr_from_shm_slice = TimeRecorder::new("get_coverage_points--from_shm_slice");
+        let tr_from_shm_slice = TimeRecorder::new("get_coverage_points::from_shm_slice");
         let single_cov_map = SingleCoverage::from_shm_slice(input.len(), map_metadata.as_slice());
         drop(tr_from_shm_slice); // log time
 
@@ -199,7 +199,7 @@ where
         log::debug!(target: "symcts_feedback", "Target reported exit kind of {:?}", exit_kind);
         let branches_before = { state.metadata::<SyMCTSGlobalMetadata>().unwrap().num_covered_branches() };
 
-        let tr_is_interesting_get_coverage_points: TimeRecorder = TimeRecorder::new("symcts_feedback_is_interesting--get_coverage_points");
+        let tr_is_interesting_get_coverage_points: TimeRecorder = TimeRecorder::new("symcts_feedback_is_interesting::get_coverage_points");
         let (cov_summary, single_cov) = self.get_coverage_points(input, observers)?;
         drop(tr_is_interesting_get_coverage_points); // log time
         
@@ -209,7 +209,7 @@ where
         let exec_time_millis = time_observer.last_runtime().unwrap().as_millis() as usize;
         add_time_for_slot("target_execution", Duration::from_millis(exec_time_millis as u64));
 
-        let tr_symcts_afl_feedback_record_metadata = TimeRecorder::new("symcts_feedback_is_interesting--record_metadata");
+        let tr_symcts_afl_feedback_record_metadata = TimeRecorder::new("symcts_feedback_is_interesting::record_metadata");
         let (modified_global, _testcase_len) = self.record_metadata(
             state, input, observers,
             &cov_summary, &single_cov,
@@ -238,7 +238,7 @@ where
             )?;
         }
 
-        let tr_postprocessing = TimeRecorder::new("symcts_feedback_is_interesting--postprocessing");
+        let tr_postprocessing = TimeRecorder::new("symcts_feedback_is_interesting::postprocessing");
         let global_meta = state.metadata_mut::<SyMCTSGlobalMetadata>().unwrap();
 
         global_meta.total_num_times_traced += 1;

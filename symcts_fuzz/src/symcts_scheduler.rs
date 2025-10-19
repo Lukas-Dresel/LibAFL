@@ -98,7 +98,7 @@ where
         let tr_total = TimeRecorder::new("SyMCTSScheduler::next");
 
         {
-            let tr_inner_scheduler = TimeRecorder::new("SyMCTSScheduler::next--0-inner scheduler");
+            let tr_inner_scheduler = TimeRecorder::new("SyMCTSScheduler::next::0-inner scheduler");
             let inner_next = self.inner_scheduler.next(state)?;
             let _ignored = inner_next; // we don't actually use the inner scheduler's choice, we use our own. We just let it track data.
         }
@@ -115,7 +115,7 @@ where
 
         let _current_tick = global_meta.total_num_times_sampled;
 
-        let tr_get_covered_ids = TimeRecorder::new("SyMCTSScheduler::next--1-get_covered_ids");
+        let tr_get_covered_ids = TimeRecorder::new("SyMCTSScheduler::next::1-get_covered_ids");
         let covered_ids = global_meta
             .covered_branch_indices()
             .filter_map(|branch_idx| {
@@ -162,10 +162,14 @@ where
             num_not_mutated
         };
 
-        let tr_scheduler_select_coverage_point = TimeRecorder::new("SyMCTSScheduler::next--2-scheduler-select-coverage-point");
+        let tr_scheduler_select_coverage_point = TimeRecorder::new("SyMCTSScheduler::next::2-scheduler-select-coverage-point");
         let mut ids = covered_ids
             .collect::<Vec<_>>();
+
+        let tr_scheduler_select_coverage_point_shuffle = TimeRecorder::new("SyMCTSScheduler::next::2-scheduler-select-coverage-point::shuffle");
         ids.shuffle(&mut rand::thread_rng());
+        drop(tr_scheduler_select_coverage_point_shuffle);
+
         #[cfg(feature="scheduling_weighted_random")]
         let max_weight = ids.iter().map(weight_function).max().unwrap_or(0) + 1;
         log::info!(target: "symcts_scheduler", "Scheduling among {} coverage points.", ids.len());
@@ -173,6 +177,7 @@ where
         log::info!(target: "symcts_scheduler", "Weights: {:?}", ids.iter().map(weight_function).collect::<Vec<_>>());
         // println!("ids={:?}", ids);
 
+        let tr_scheduler_get_scheduled_branch_index = TimeRecorder::new("SyMCTSScheduler::next::2-scheduler-select-coverage-point::select_weighted");
         #[cfg(feature="scheduling_weighted_minimum")]
         let scheduled_branch_idx = ids
             .into_iter()
@@ -189,6 +194,7 @@ where
         let scheduled_branch_idx = ids.into_iter().next();
 
         log::debug!(target: "symcts_scheduler", "scheduled: {:?}", scheduled_branch_idx);
+        drop(tr_scheduler_get_scheduled_branch_index);
         drop(tr_scheduler_select_coverage_point);
 
         let sched_log_path = global_meta.sync_dir.join(".scheduler.log");

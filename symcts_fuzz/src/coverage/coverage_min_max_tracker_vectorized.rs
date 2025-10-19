@@ -83,7 +83,7 @@ impl CoverageMinMaxTracker {
         assert!(coverage.num_vectored_entries() == self.map.len() || self.map.len() == 0);
         if self.map.len() == 0 {
             // here we only have to iterate over the non-zeros in the input, we know for sure they are interesting
-            let tr_fastpath_empty_map = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--fastpath_empty_map");
+            let tr_fastpath_empty_map = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for::fastpath_empty_map");
             return coverage
                 .non_zero_bitmap
                 .iter_ones()
@@ -103,7 +103,7 @@ impl CoverageMinMaxTracker {
 
         #[cfg(feature="coverage_fastpath_no_change_case")]
         {
-            let tr_fastpath_no_change_case = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--fastpath_no_change_case");
+            let tr_fastpath_no_change_case = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for::fastpath_no_change_case");
             let mut is_interesting = CounterCondMask::splat(false);
 
             // Iterate through bitmap chunks and OR them on-the-fly to avoid allocation
@@ -143,7 +143,7 @@ impl CoverageMinMaxTracker {
 
         // then, in the rare case that we do see an improvement, we have to do it again, to find where the improvement
         // happened
-        let tr_detailed_check = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check");
+        let tr_detailed_check = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for::detailed_check");
 
         // Use the same chunked iteration approach
         let self_storage = self.present_bitmap.as_raw_slice();
@@ -168,7 +168,7 @@ impl CoverageMinMaxTracker {
                     let (min_ent, max_ent) = &self.map[pos];
                     let cur_ent = coverage.map[pos];
 
-                    let tr_detailed_check_minimizes = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check--minimizes");
+                    let tr_detailed_check_minimizes = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for::detailed_check::minimizes");
                     let minimizes = min_ent.is_better(cur_ent);
 
                     // fast path out ASAP if at all possible
@@ -182,7 +182,7 @@ impl CoverageMinMaxTracker {
                     }
                     drop(tr_detailed_check_minimizes); // log time
 
-                    let tr_detailed_check_maximizes = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for--detailed_check--maximizes");
+                    let tr_detailed_check_maximizes = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for::detailed_check::maximizes");
                     let maximizes = max_ent.is_better(cur_ent);
                     if maximizes.any() {
                         let index_max = maximizes.to_array().iter().position(|&x| x).unwrap();
