@@ -48,7 +48,7 @@ pub fn dump_total_time_snapshot() {
 /// Dump percentage time snapshot to `/tmp/symcts_times_snapshot_percentages.txt`
 pub fn dump_percentage_time_snapshot() {
     let tracker = get_time_tracker().lock().unwrap();
-    let total_time_ns: u128 = tracker.times.values().sum();
+    let total_time_ns: u128 = tracker.start_time.elapsed().as_nanos();
     let snapshot_path = "/tmp/symcts_times_snapshot_percentages.txt";
     let mut snapshot_content = String::new();
 
