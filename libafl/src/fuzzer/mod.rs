@@ -781,10 +781,12 @@ where
         state: &mut Self::State,
         manager: &mut EM,
     ) -> Result<CorpusId, Error> {
+        let tr_full = TimeRecorder::new("StdFuzzer::fuzz_one");
         // Init timer for scheduler
         #[cfg(feature = "introspection")]
         state.introspection_monitor_mut().start_timer();
 
+        let tr_scheduler_get_next = TimeRecorder::new("StdFuzzer::fuzz_one::scheduler-get-next");
         // Get the next index from the scheduler
         let id = if let Some(id) = state.current_corpus_id()? {
             id // we are resuming
@@ -793,6 +795,7 @@ where
             state.set_corpus_id(id)?; // set up for resume
             id
         };
+        drop(tr_scheduler_get_next);
 
         // Mark the elapsed time for the scheduler
         #[cfg(feature = "introspection")]
@@ -802,20 +805,25 @@ where
         #[cfg(feature = "introspection")]
         state.introspection_monitor_mut().reset_stage_index();
 
+        let tr_perform_stages = TimeRecorder::new("StdFuzzer::fuzz_one::perform-stages");
         // Execute all stages
         stages.perform_all(self, executor, state, manager)?;
+        drop(tr_perform_stages);
 
         // Init timer for manager
         #[cfg(feature = "introspection")]
         state.introspection_monitor_mut().start_timer();
 
+        let tr_manager_process = TimeRecorder::new("StdFuzzer::fuzz_one::manager-process");
         // Execute the manager
         manager.process(self, state, executor)?;
+        drop(tr_manager_process);
 
         // Mark the elapsed time for the manager
         #[cfg(feature = "introspection")]
         state.introspection_monitor_mut().mark_manager_time();
 
+        let tr_set_scheduled = TimeRecorder::new("StdFuzzer::fuzz_one::set-scheduled");
         {
             if let Ok(mut testcase) = state.testcase_mut(id) {
                 let scheduled_count = testcase.scheduled_count();
@@ -823,8 +831,11 @@ where
                 testcase.set_scheduled_count(scheduled_count + 1);
             }
         }
+        drop(tr_set_scheduled);
 
+        let tr_clear_corpus_id = TimeRecorder::new("StdFuzzer::fuzz_one::clear-corpus-id");
         state.clear_corpus_id()?;
+        drop(tr_clear_corpus_id);
 
         if state.stop_requested() {
             state.discard_stop_request();
