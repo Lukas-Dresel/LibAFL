@@ -101,45 +101,45 @@ impl CoverageMinMaxTracker {
         // so let's do that now, doing a quick bitwise or on the map only to detect if any improvements were made
         // if not, this is the fastest possible way out
 
-        #[cfg(feature="coverage_fastpath_no_change_case")]
-        {
-            let tr_fastpath_no_change_case = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for::fastpath_no_change_case");
-            let mut is_interesting = CounterCondMask::splat(false);
+        // #[cfg(feature="coverage_fastpath_no_change_case")]
+        // {
+        //     let tr_fastpath_no_change_case = TimeRecorder::new("CoverageMinMaxTracker::is_interesting_for::fastpath_no_change_case");
+        //     let mut is_interesting = CounterCondMask::splat(false);
 
-            // Iterate through bitmap chunks and OR them on-the-fly to avoid allocation
-            let self_storage = self.present_bitmap.as_raw_slice();
-            let coverage_storage = coverage.non_zero_bitmap.as_raw_slice();
-            let max_chunks = self_storage.len().max(coverage_storage.len());
+        //     // Iterate through bitmap chunks and OR them on-the-fly to avoid allocation
+        //     let self_storage = self.present_bitmap.as_raw_slice();
+        //     let coverage_storage = coverage.non_zero_bitmap.as_raw_slice();
+        //     let max_chunks = self_storage.len().max(coverage_storage.len());
 
-            for chunk_idx in 0..max_chunks {
-                let self_chunk = self_storage.get(chunk_idx).copied().unwrap_or(0);
-                let cov_chunk = coverage_storage.get(chunk_idx).copied().unwrap_or(0);
-                let union_chunk = self_chunk | cov_chunk;
+        //     for chunk_idx in 0..max_chunks {
+        //         let self_chunk = self_storage.get(chunk_idx).copied().unwrap_or(0);
+        //         let cov_chunk = coverage_storage.get(chunk_idx).copied().unwrap_or(0);
+        //         let union_chunk = self_chunk | cov_chunk;
 
-                if union_chunk == 0 {
-                    continue; // Skip empty chunks
-                }
+        //         if union_chunk == 0 {
+        //             continue; // Skip empty chunks
+        //         }
 
-                // Iterate over set bits in this chunk
-                let mut remaining = union_chunk;
-                while remaining != 0 {
-                    let bit_offset = remaining.trailing_zeros() as usize;
-                    let pos = chunk_idx * (usize::BITS as usize) + bit_offset;
+        //         // Iterate over set bits in this chunk
+        //         let mut remaining = union_chunk;
+        //         while remaining != 0 {
+        //             let bit_offset = remaining.trailing_zeros() as usize;
+        //             let pos = chunk_idx * (usize::BITS as usize) + bit_offset;
 
-                    if pos < self.map.len() {
-                        let (min_ent, max_ent) = &self.map[pos];
-                        let cur_ent = coverage.map[pos];
-                        is_interesting |= MinimizingVectorizedCounter::is_better_combined(min_ent, max_ent, cur_ent);
-                    }
+        //             if pos < self.map.len() {
+        //                 let (min_ent, max_ent) = &self.map[pos];
+        //                 let cur_ent = coverage.map[pos];
+        //                 is_interesting |= MinimizingVectorizedCounter::is_better_combined(min_ent, max_ent, cur_ent);
+        //             }
 
-                    remaining &= remaining - 1; // Clear lowest set bit
-                }
-            }
+        //             remaining &= remaining - 1; // Clear lowest set bit
+        //         }
+        //     }
 
-            if !is_interesting.any() {
-                return None; // the most common case, no improvements anywhere, just exit out
-            }
-        }
+        //     if !is_interesting.any() {
+        //         return None; // the most common case, no improvements anywhere, just exit out
+        //     }
+        // }
 
         // then, in the rare case that we do see an improvement, we have to do it again, to find where the improvement
         // happened
