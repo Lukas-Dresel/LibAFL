@@ -3,7 +3,7 @@
 use alloc::{string::ToString, vec::Vec};
 use core::{fmt::Debug, time::Duration};
 
-use libafl_bolts::current_time;
+use libafl_bolts::{current_time, timerecorder::TimeRecorder};
 use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
@@ -243,8 +243,10 @@ where
         let monitor_timeout = STATS_TIMEOUT_DEFAULT;
         loop {
             // log::info!("Starting another fuzz_loop");
+            let tr = TimeRecorder::new("Fuzzer::fuzz_loop");
             manager.maybe_report_progress(state, monitor_timeout)?;
             self.fuzz_one(stages, executor, state, manager)?;
+            drop(tr);
         }
     }
 
