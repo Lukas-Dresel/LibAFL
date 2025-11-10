@@ -26,6 +26,7 @@ pub mod minimizer;
 use core::{cell::RefCell, fmt};
 
 pub mod nop;
+pub mod devnull;
 #[cfg(feature = "cmin")]
 pub use minimizer::*;
 pub use nop::NopCorpus;
